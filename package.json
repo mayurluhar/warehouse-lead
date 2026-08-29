@@ -1,0 +1,24 @@
+{
+  "name": "warehouse-lead-platform",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "packages/*",
+    "functions",
+    "apps/*"
+  ],
+  "scripts": {
+    "dev": "concurrently -k -p \"[{name}]\" -n \"API,WEB\" -c \"cyan,magenta\" \"npm run dev --workspace=@warehouse-lead/functions\" \"npm run dev --workspace=@warehouse-lead/web\"",
+    "dev:sst": "sst dev",
+    "build": "npm run build --workspaces",
+    "test": "npm run test --workspaces"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "concurrently": "^9.1.0",
+    "sst": "^4.17.1",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}
