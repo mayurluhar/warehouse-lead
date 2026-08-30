@@ -1,0 +1,21 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "lib": ["ES2022"],
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "verbatimModuleSyntax": false,
+
+    // Nothing in this repo consumes compiled output: SST/esbuild bundles the
+    // Lambda from TS, tsx runs the local server from TS, Vite bundles the web
+    // app from TS. Emitting would only litter src/ with .js and .d.ts files,
+    // so every package typechecks and never emits.
+    "noEmit": true
+  }
+}

@@ -16,7 +16,15 @@ export default $config({
     // API Lambda Function supporting AWS Bedrock & S3
     const api = new sst.aws.Function("ApiHandler", {
       handler: "functions/src/api.handler",
-      url: true,
+      // CORS is owned by the handler (functions/src/api.ts CORS_HEADERS), which is
+      // the only source that works across all three runtimes: Lambda Function URL,
+      // `sst dev`, and the plain node local-server.
+      //
+      // Do NOT set `url: true` here. SST expands that to a default Function URL CORS
+      // config of allowOrigins/allowMethods/allowHeaders ["*"], and AWS then injects
+      // its own Access-Control-Allow-Origin alongside the handler's. The browser sees
+      // two values ("*, *") and blocks every response.
+      url: { cors: false },
       link: [evidenceBucket],
       timeout: "60 seconds",
       memory: "1024 MB",

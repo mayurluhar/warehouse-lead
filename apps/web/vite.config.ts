@@ -5,7 +5,12 @@ import path from 'path';
 export default defineConfig(({ mode }) => {
   const rootDir = path.resolve(__dirname, '../../');
   const env = loadEnv(mode, rootDir, '');
-  const targetApi = env.VITE_API_URL || process.env.VITE_API_URL || 'http://localhost:4000';
+
+  // process.env wins over the .env file: under `sst dev` SST injects the live
+  // Lambda Function URL into the process, and the checked-in .env value
+  // (http://localhost:4000) must not shadow it. Falls back to the .env file for
+  // `npm run dev`, then to the local node server.
+  const targetApi = process.env.VITE_API_URL || env.VITE_API_URL || 'http://localhost:4000';
 
   return {
     plugins: [react()],

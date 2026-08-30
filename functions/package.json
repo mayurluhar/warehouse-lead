@@ -5,7 +5,7 @@
   "main": "src/api.ts",
   "scripts": {
     "dev": "tsx watch src/local-server.ts",
-    "build": "tsc"
+    "typecheck": "tsc"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.714.0",

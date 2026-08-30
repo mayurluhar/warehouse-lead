@@ -1,6 +1,15 @@
 import { LeadRecord, PipelineStats } from '../types/lead';
 
-const API_BASE = import.meta.env.VITE_API_URL ? import.meta.env.VITE_API_URL.replace(/\/$/, '') : '';
+// In dev, stay same-origin and let the Vite proxy (see vite.config.ts) forward
+// /api to whatever backend is active — the local node server or the SST Lambda
+// Function URL. A relative base means the browser never issues a cross-origin
+// request, so CORS cannot fail the local workflow.
+//
+// In a production build there is no proxy, so the deployed site must call the
+// Function URL directly using the VITE_API_URL baked in at build time.
+const API_BASE = import.meta.env.DEV
+  ? ''
+  : (import.meta.env.VITE_API_URL ?? '').replace(/\/$/, '');
 
 export async function fetchLeads(params: {
   search?: string;

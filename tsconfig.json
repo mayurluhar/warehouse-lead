@@ -1,14 +1,5 @@
 {
-  "compilerOptions": {
-    "target": "ES2022",
-    "module": "ESNext",
-    "moduleResolution": "Bundler",
-    "strict": true,
-    "esModuleInterop": true,
-    "skipLibCheck": true,
-    "forceConsistentCasingInFileNames": true,
-    "resolveJsonModule": true
-  },
-  "include": ["sst.config.ts"],
+  "extends": "./tsconfig.base.json",
+  "include": ["sst.config.ts", "sst-env.d.ts"],
   "exclude": [".sst", "node_modules", "dist", "apps", "packages", "functions"]
 }
