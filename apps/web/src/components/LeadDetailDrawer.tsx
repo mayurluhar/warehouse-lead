@@ -1,5 +1,5 @@
 import React from 'react';
-import { LeadRecord } from '../types/lead';
+import { Lead } from '@warehouse-lead/core/client';
 import { ScoreBreakdown } from './ScoreBreakdown';
 import {
   X,
@@ -10,9 +10,9 @@ import {
 } from 'lucide-react';
 
 interface LeadDetailDrawerProps {
-  lead: LeadRecord | null;
+  lead: Lead | null;
   onClose: () => void;
-  onUpdateStatus: (id: string, status: LeadRecord['status']) => void;
+  onUpdateStatus: (id: string, status: Lead['status']) => void;
 }
 
 export const LeadDetailDrawer: React.FC<LeadDetailDrawerProps> = ({
@@ -102,7 +102,7 @@ export const LeadDetailDrawer: React.FC<LeadDetailDrawerProps> = ({
             Lead Pipeline Stage:
           </span>
           <div style={{ display: 'flex', gap: '6px' }}>
-            {(['inbox', 'approved', 'contacted', 'rejected'] as LeadRecord['status'][]).map((st) => (
+            {(['inbox', 'approved', 'contacted', 'rejected'] as Lead['status'][]).map((st) => (
               <button
                 key={st}
                 onClick={() => onUpdateStatus(lead.id, st)}

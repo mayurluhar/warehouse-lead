@@ -1,5 +1,5 @@
 import React from 'react';
-import { LeadRecord, Intent } from '../types/lead';
+import { Lead, Intent } from '@warehouse-lead/core/client';
 import {
   MapPin,
   Check,
@@ -9,9 +9,9 @@ import {
 } from 'lucide-react';
 
 interface LeadTableProps {
-  leads: LeadRecord[];
-  onSelectLead: (lead: LeadRecord) => void;
-  onUpdateStatus: (id: string, status: LeadRecord['status'], e: React.MouseEvent) => void;
+  leads: Lead[];
+  onSelectLead: (lead: Lead) => void;
+  onUpdateStatus: (id: string, status: Lead['status'], e: React.MouseEvent) => void;
   selectedLeadId: string | null;
 }
 

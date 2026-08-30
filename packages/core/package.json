@@ -10,5 +10,15 @@
   "devDependencies": {
     "@types/node": "^22.10.2",
     "typescript": "^5.7.2"
+  },
+  "dependencies": {
+    "@aws-sdk/client-bedrock-runtime": "^3.714.0",
+    "axios": "^1.7.9",
+    "cheerio": "^1.0.0",
+    "rss-parser": "^3.13.0"
+  },
+  "exports": {
+    ".": "./src/index.ts",
+    "./client": "./src/client.ts"
   }
 }

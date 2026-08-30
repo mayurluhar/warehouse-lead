@@ -1,13 +1,17 @@
 import React from 'react';
-import { Warehouse, RefreshCw, Trash2, ShieldCheck } from 'lucide-react';
+import { Warehouse, Loader2, Trash2, ShieldCheck } from 'lucide-react';
 
 interface HeaderProps {
-  onRefresh: () => void;
   onClear: () => void;
   loading: boolean;
 }
 
-export const Header: React.FC<HeaderProps> = ({ onRefresh, onClear, loading }) => {
+/**
+ * There is no Refresh action any more: leads live in React state, so there is
+ * nothing on a server to re-read. Reset clears that state, and a browser
+ * refresh does the same thing.
+ */
+export const Header: React.FC<HeaderProps> = ({ onClear, loading }) => {
   return (
     <header style={{
       borderBottom: '1px solid var(--border-subtle)',
@@ -86,11 +90,8 @@ export const Header: React.FC<HeaderProps> = ({ onRefresh, onClear, loading }) =
             <span>AWS Bedrock & Connectors Live</span>
           </div>
 
-          <button
-            onClick={onRefresh}
-            disabled={loading}
-            title="Refresh Leads"
-            style={{
+          {loading && (
+            <div style={{
               display: 'flex',
               alignItems: 'center',
               gap: '6px',
@@ -98,20 +99,19 @@ export const Header: React.FC<HeaderProps> = ({ onRefresh, onClear, loading }) =
               borderRadius: '8px',
               backgroundColor: '#ffffff',
               border: '1px solid var(--border-subtle)',
-              color: 'var(--text-primary)',
+              color: 'var(--text-secondary)',
               fontSize: '0.85rem',
               fontWeight: 600,
-              boxShadow: 'var(--shadow-xs)',
-              transition: 'all 0.15s ease'
-            }}
-          >
-            <RefreshCw size={14} style={{ animation: loading ? 'spin 1s linear infinite' : 'none' }} />
-            <span>Refresh</span>
-          </button>
+              boxShadow: 'var(--shadow-xs)'
+            }}>
+              <Loader2 size={14} style={{ animation: 'spin 1s linear infinite' }} />
+              <span>Ingesting…</span>
+            </div>
+          )}
 
           <button
             onClick={onClear}
-            title="Clear all stored leads"
+            title="Clear all leads held in this browser session"
             style={{
               display: 'flex',
               alignItems: 'center',

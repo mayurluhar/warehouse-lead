@@ -1,5 +1,5 @@
 import React from 'react';
-import { ScoreBreakdown as IScoreBreakdown } from '../types/lead';
+import { ScoreBreakdown as IScoreBreakdown } from '@warehouse-lead/core/client';
 import { CheckCircle2 } from 'lucide-react';
 
 interface ScoreBreakdownProps {

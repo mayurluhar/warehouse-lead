@@ -1,5 +1,5 @@
 import React from 'react';
-import { PipelineStats } from '../types/lead';
+import { PipelineStats } from '@warehouse-lead/core/client';
 import { Radio, FileCheck, ShieldAlert, Sparkles, TrendingUp } from 'lucide-react';
 
 interface StatsBarProps {

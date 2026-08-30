@@ -1,272 +1,153 @@
 import { APIGatewayProxyEventV2, APIGatewayProxyResultV2 } from 'aws-lambda';
-import { RssNewsConnector, UrlScraperConnector, getSampleDocuments } from '@warehouse-lead/connectors';
-import { BedrockLeadExtractor } from '@warehouse-lead/ai';
-import { LeadDeduplicator, RawDocument, LeadFilterOptions } from '@warehouse-lead/core';
-import { globalLeadStore } from './store';
+import { Lead, createRequestContext } from '@warehouse-lead/core';
+import { createRequestContainer } from './composition/Container';
+import { errorResponse, response } from './http/HttpResponse';
 
-const extractor = new BedrockLeadExtractor();
-const deduplicator = new LeadDeduplicator();
-const rssConnector = new RssNewsConnector();
-const urlScraper = new UrlScraperConnector();
+/**
+ * Presentation layer.
+ *
+ * Responsibilities are strictly: match a route, parse the event into use-case
+ * input, invoke the use case, shape the result. No extraction, scoring,
+ * deduplication or persistence logic lives here.
+ *
+ * The API is stateless. Every ingestion request carries the leads the client
+ * already holds; the pipeline runs against them and the full updated set comes
+ * back. Nothing is retained between requests, so the React desk is the single
+ * owner of POC state and a browser refresh clears it.
+ *
+ * Reads and workflow mutations (list, detail, status, stats, reset) have no
+ * server-side endpoint any more — the client holds the leads, so it answers
+ * those itself using the same domain services via `@warehouse-lead/core/client`.
+ */
 
-const CORS_HEADERS = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Methods': 'GET, POST, PATCH, DELETE, OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type, Authorization, x-api-key, X-Requested-With, Accept, Origin',
-  'Content-Type': 'application/json'
-};
+/** Counts shaped so the client can accumulate them uniformly across paths. */
+interface IngestionCounts {
+  scannedCount: number;
+  relevantCount: number;
+  discardedCount: number;
+  newLeadsAdded: number;
+}
 
-function response(statusCode: number, body: unknown): APIGatewayProxyResultV2 {
+function parseBody(event: APIGatewayProxyEventV2): Record<string, unknown> {
+  if (!event.body) return {};
+  try {
+    return JSON.parse(event.body) as Record<string, unknown>;
+  } catch {
+    throw new Error('Validation failed: request body is not valid JSON');
+  }
+}
+
+/**
+ * Leads the client currently holds. Absent or malformed means "start empty",
+ * which simply means nothing can be deduplicated against.
+ */
+function parseKnownLeads(body: Record<string, unknown>): Lead[] {
+  const known = body.knownLeads;
+  return Array.isArray(known) ? (known as Lead[]) : [];
+}
+
+function singleDocumentCounts(isRelevant: boolean, isNew: boolean): IngestionCounts {
   return {
-    statusCode,
-    headers: CORS_HEADERS,
-    body: JSON.stringify(body)
+    scannedCount: 1,
+    relevantCount: isRelevant ? 1 : 0,
+    discardedCount: isRelevant ? 0 : 1,
+    newLeadsAdded: isNew ? 1 : 0
   };
 }
 
 export async function handler(event: APIGatewayProxyEventV2): Promise<APIGatewayProxyResultV2> {
   const method = event.requestContext.http.method.toUpperCase();
-  const rawPath = event.requestContext.http.path || '/';
-
-  // Normalize path (strip trailing slash)
-  const path = rawPath.replace(/\/$/, '') || '/';
+  const path = (event.requestContext.http.path || '/').replace(/\/$/, '') || '/';
 
   if (method === 'OPTIONS') {
     return response(200, { ok: true });
   }
 
+  // Synthesised until Cognito exists; see RequestContext.
+  const context = createRequestContext(event.requestContext.requestId);
+
   try {
-    // 1. Ingest Multi-Source Scan (Google News RSS + Curated Sources)
-    if (method === 'POST' && path === '/api/ingest/scan') {
-      const documents = await rssConnector.fetchWarehouseFeeds();
-      globalLeadStore.incrementScanned(documents.length);
+    if (method === 'POST' && path.startsWith('/api/ingest/')) {
+      const body = parseBody(event);
+      const container = createRequestContainer(parseKnownLeads(body), context.tenantId);
 
-      let relevantCount = 0;
-      let discardedCount = 0;
-      let newCount = 0;
-
-      for (const doc of documents) {
-        const extracted = await extractor.extract(doc.title, doc.cleanText);
-        if (!extracted.isRelevant) {
-          discardedCount++;
-          globalLeadStore.incrementFalsePositives(1);
-          continue;
-        }
-
-        relevantCount++;
-        const { lead, isNew } = deduplicator.processExtractedLead(
-          extracted,
-          doc,
-          globalLeadStore.getAll()
-        );
-
-        globalLeadStore.save(lead);
-        if (isNew) newCount++;
-      }
-
-      return response(200, {
-        success: true,
-        scannedCount: documents.length,
-        relevantCount,
-        discardedCount,
-        newLeadsAdded: newCount,
-        totalLeads: globalLeadStore.getAll().length
-      });
-    }
-
-    // 2. Ingest Single URL
-    if (method === 'POST' && path === '/api/ingest/url') {
-      const body = JSON.parse(event.body || '{}');
-      if (!body.url) {
-        return response(400, { error: 'url is required' });
-      }
-
-      const doc = await urlScraper.scrapeUrl(body.url);
-      globalLeadStore.incrementScanned(1);
-
-      const extracted = await extractor.extract(doc.title, doc.cleanText);
-      if (!extracted.isRelevant) {
-        globalLeadStore.incrementFalsePositives(1);
+      if (path === '/api/ingest/scan') {
+        const result = await container.scanNewsSources.execute(undefined, context);
+        const { leads } = await container.listLeads.execute({}, context);
         return response(200, {
-          success: false,
-          isRelevant: false,
-          reason: extracted.reasoningSummary,
-          document: doc
+          success: true,
+          scannedCount: result.scannedCount,
+          relevantCount: result.relevantCount,
+          discardedCount: result.discardedCount,
+          newLeadsAdded: result.newLeadsAdded,
+          leads
         });
       }
 
-      const { lead, isNew, isCorroborated } = deduplicator.processExtractedLead(
-        extracted,
-        doc,
-        globalLeadStore.getAll()
-      );
-
-      globalLeadStore.save(lead);
-
-      return response(200, {
-        success: true,
-        isNew,
-        isCorroborated,
-        lead
-      });
-    }
-
-    // 3. Ingest Raw Text / Trade Newsletter
-    if (method === 'POST' && path === '/api/ingest/text') {
-      const body = JSON.parse(event.body || '{}');
-      if (!body.text) {
-        return response(400, { error: 'text is required' });
-      }
-
-      const title = body.title || 'Direct Ingestion Signal';
-      const doc: RawDocument = {
-        id: `raw_${Date.now()}`,
-        sourceUrl: body.sourceUrl || 'direct_input',
-        canonicalUrl: body.sourceUrl || `direct_input://${Date.now()}`,
-        title,
-        publishedAt: new Date().toISOString(),
-        rawText: body.text,
-        cleanText: body.text,
-        sourceType: (body.sourceType as RawDocument['sourceType']) || 'manual_text',
-        trustTier: (body.trustTier as RawDocument['trustTier']) || 'unverified',
-        contentHash: `hash_${Date.now()}`,
-        fetchedAt: new Date().toISOString()
-      };
-
-      globalLeadStore.incrementScanned(1);
-
-      const extracted = await extractor.extract(title, body.text);
-      if (!extracted.isRelevant) {
-        globalLeadStore.incrementFalsePositives(1);
+      if (path === '/api/ingest/samples') {
+        const result = await container.ingestSampleSignals.execute(undefined, context);
         return response(200, {
-          success: false,
-          isRelevant: false,
-          reason: extracted.reasoningSummary
+          success: true,
+          scannedCount: result.scannedCount,
+          relevantCount: result.relevantCount,
+          discardedCount: result.discardedCount,
+          newLeadsAdded: result.newLeadsAdded,
+          leads: result.leads
         });
       }
 
-      const { lead, isNew } = deduplicator.processExtractedLead(
-        extracted,
-        doc,
-        globalLeadStore.getAll()
-      );
+      if (path === '/api/ingest/url') {
+        const result = await container.ingestUrl.execute({ url: body.url as string }, context);
+        const { leads } = await container.listLeads.execute({}, context);
+        return response(200, {
+          success: result.isRelevant,
+          isRelevant: result.isRelevant,
+          reason: result.reason,
+          isNew: result.isNew,
+          isCorroborated: result.isCorroborated,
+          lead: result.lead,
+          document: result.document,
+          ...singleDocumentCounts(result.isRelevant, result.isNew),
+          leads
+        });
+      }
 
-      globalLeadStore.save(lead);
-
-      return response(200, {
-        success: true,
-        isNew,
-        lead
-      });
-    }
-
-    // 4. Ingest Benchmark Signals
-    if (method === 'POST' && path === '/api/ingest/samples') {
-      const samples = getSampleDocuments();
-      globalLeadStore.incrementScanned(samples.length);
-
-      let relevant = 0;
-      let discarded = 0;
-
-      for (const doc of samples) {
-        const extracted = await extractor.extract(doc.title, doc.cleanText);
-        if (!extracted.isRelevant) {
-          discarded++;
-          globalLeadStore.incrementFalsePositives(1);
-          continue;
-        }
-
-        relevant++;
-        const { lead } = deduplicator.processExtractedLead(
-          extracted,
-          doc,
-          globalLeadStore.getAll()
+      if (path === '/api/ingest/text') {
+        const result = await container.ingestText.execute(
+          {
+            text: body.text as string,
+            title: body.title as string | undefined,
+            sourceUrl: body.sourceUrl as string | undefined,
+            sourceType: body.sourceType as never,
+            trustTier: body.trustTier as never
+          },
+          context
         );
-
-        globalLeadStore.save(lead);
+        const { leads } = await container.listLeads.execute({}, context);
+        return response(200, {
+          success: result.isRelevant,
+          isRelevant: result.isRelevant,
+          reason: result.reason,
+          isNew: result.isNew,
+          isCorroborated: result.isCorroborated,
+          lead: result.lead,
+          ...singleDocumentCounts(result.isRelevant, result.isNew),
+          leads
+        });
       }
-
-      return response(200, {
-        success: true,
-        scannedCount: samples.length,
-        relevantCount: relevant,
-        discardedCount: discarded,
-        leads: globalLeadStore.getAll()
-      });
     }
 
-    // 5. Get Leads (with search & filters)
-    if (method === 'GET' && path === '/api/leads') {
-      const queryParams = event.queryStringParameters || {};
-      const filters: LeadFilterOptions = {
-        search: queryParams.search,
-        intent: queryParams.intent as LeadFilterOptions['intent'],
-        city: queryParams.city,
-        corridor: queryParams.corridor,
-        minConfidence: queryParams.minConfidence ? parseInt(queryParams.minConfidence, 10) : undefined,
-        minSqft: queryParams.minSqft ? parseInt(queryParams.minSqft, 10) : undefined,
-        status: queryParams.status as LeadFilterOptions['status'],
-        sortBy: queryParams.sortBy as LeadFilterOptions['sortBy'],
-        sortOrder: queryParams.sortOrder as LeadFilterOptions['sortOrder']
-      };
-
-      const leads = globalLeadStore.getAll(filters);
-      return response(200, {
-        count: leads.length,
-        leads
-      });
-    }
-
-    // 6. Get Lead Detail by ID
-    const leadDetailMatch = path.match(/^\/api\/leads\/([a-zA-Z0-9_\-]+)$/);
-    if (method === 'GET' && leadDetailMatch) {
-      const leadId = leadDetailMatch[1];
-      const lead = globalLeadStore.getById(leadId);
-      if (!lead) {
-        return response(404, { error: 'Lead not found' });
-      }
-      return response(200, { lead });
-    }
-
-    // 7. Update Lead Status (e.g. approve/reject/contacted)
-    const statusMatch = path.match(/^\/api\/leads\/([a-zA-Z0-9_\-]+)\/status$/);
-    if (method === 'PATCH' && statusMatch) {
-      const leadId = statusMatch[1];
-      const body = JSON.parse(event.body || '{}');
-      const updated = globalLeadStore.updateStatus(leadId, body.status);
-      if (!updated) {
-        return response(404, { error: 'Lead not found' });
-      }
-      return response(200, { success: true, lead: updated });
-    }
-
-    // 8. Pipeline Statistics
-    if (method === 'GET' && path === '/api/stats') {
-      return response(200, globalLeadStore.getStats());
-    }
-
-    // 9. Reset Leads
-    if (method === 'DELETE' && path === '/api/leads') {
-      globalLeadStore.clear();
-      return response(200, { success: true, message: 'Lead store reset' });
-    }
-
-    // Root Health Check
     if (path === '' || path === '/' || path === '/api/health') {
       return response(200, {
         status: 'healthy',
         service: 'Warehouse Lead Intelligence Platform - Ingestion API',
-        timestamp: new Date().toISOString(),
-        leadsCount: globalLeadStore.getAll().length
+        stateful: false,
+        timestamp: new Date().toISOString()
       });
     }
 
     return response(404, { error: 'Not Found', path, method });
   } catch (error) {
-    console.error('API execution error:', error);
-    return response(500, {
-      error: 'Internal Server Error',
-      message: (error as Error).message
-    });
+    return errorResponse(error);
   }
 }

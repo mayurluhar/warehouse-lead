@@ -3,8 +3,10 @@ import {
   triggerMultiSourceScan,
   ingestUrl,
   ingestRawText,
-  loadBenchmarkSamples
+  loadBenchmarkSamples,
+  IngestionResponse
 } from '../services/api';
+import { Lead } from '@warehouse-lead/core/client';
 import {
   Radio,
   Globe,
@@ -18,15 +20,27 @@ import {
 } from 'lucide-react';
 
 interface IngestionHubProps {
-  onIngestionComplete: () => void;
+  /** Leads this browser holds; sent so the server can deduplicate against them. */
+  knownLeads: Lead[];
+  onIngested: (result: IngestionResponse) => void;
+  onLoadingChange: (loading: boolean) => void;
 }
 
 type TabType = 'scan' | 'url' | 'text' | 'benchmark';
 
-export const IngestionHub: React.FC<IngestionHubProps> = ({ onIngestionComplete }) => {
+export const IngestionHub: React.FC<IngestionHubProps> = ({
+  knownLeads,
+  onIngested,
+  onLoadingChange
+}) => {
   const [activeTab, setActiveTab] = useState<TabType>('scan');
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoadingState] = useState(false);
   const [statusMessage, setStatusMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+
+  const setLoading = (value: boolean) => {
+    setLoadingState(value);
+    onLoadingChange(value);
+  };
 
   // Form states
   const [urlInput, setUrlInput] = useState('');
@@ -37,12 +51,12 @@ export const IngestionHub: React.FC<IngestionHubProps> = ({ onIngestionComplete 
     setLoading(true);
     setStatusMessage(null);
     try {
-      const res = await triggerMultiSourceScan();
+      const res = await triggerMultiSourceScan(knownLeads);
+      onIngested(res);
       setStatusMessage({
         type: 'success',
         text: `Live scan finished! Scanned ${res.scannedCount} items. Extracted ${res.relevantCount} warehouse signals (${res.newLeadsAdded} new). Discarded ${res.discardedCount} non-demand items.`
       });
-      onIngestionComplete();
     } catch (err) {
       setStatusMessage({ type: 'error', text: `Scan failed: ${(err as Error).message}` });
     } finally {
@@ -56,14 +70,14 @@ export const IngestionHub: React.FC<IngestionHubProps> = ({ onIngestionComplete 
     setLoading(true);
     setStatusMessage(null);
     try {
-      const res = await ingestUrl(urlInput);
+      const res = await ingestUrl(urlInput, knownLeads);
+      onIngested(res);
       if (res.success) {
         setStatusMessage({
           type: 'success',
           text: `Extracted lead: "${res.lead?.organizationName || res.lead?.title}" (Confidence: ${res.lead?.confidence}%)`
         });
         setUrlInput('');
-        onIngestionComplete();
       } else {
         setStatusMessage({
           type: 'error',
@@ -83,7 +97,8 @@ export const IngestionHub: React.FC<IngestionHubProps> = ({ onIngestionComplete 
     setLoading(true);
     setStatusMessage(null);
     try {
-      const res = await ingestRawText(textBody, textTitle || 'Direct Ingestion');
+      const res = await ingestRawText(textBody, textTitle || 'Direct Ingestion', knownLeads);
+      onIngested(res);
       if (res.success) {
         setStatusMessage({
           type: 'success',
@@ -91,7 +106,6 @@ export const IngestionHub: React.FC<IngestionHubProps> = ({ onIngestionComplete 
         });
         setTextTitle('');
         setTextBody('');
-        onIngestionComplete();
       } else {
         setStatusMessage({
           type: 'error',
@@ -109,12 +123,12 @@ export const IngestionHub: React.FC<IngestionHubProps> = ({ onIngestionComplete 
     setLoading(true);
     setStatusMessage(null);
     try {
-      const res = await loadBenchmarkSamples();
+      const res = await loadBenchmarkSamples(knownLeads);
+      onIngested(res);
       setStatusMessage({
         type: 'success',
         text: `Loaded ${res.relevantCount} verified benchmark signals (FCI Aslali Tender, Blinkit Sanand Hub, Sun Pharma Changodar Cold Storage, GIDC Dahej BTS, etc.)`
       });
-      onIngestionComplete();
     } catch (err) {
       setStatusMessage({ type: 'error', text: `Benchmark loading failed: ${(err as Error).message}` });
     } finally {

@@ -9,8 +9,6 @@
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.714.0",
-    "@warehouse-lead/ai": "*",
-    "@warehouse-lead/connectors": "*",
     "@warehouse-lead/core": "*"
   },
   "devDependencies": {
