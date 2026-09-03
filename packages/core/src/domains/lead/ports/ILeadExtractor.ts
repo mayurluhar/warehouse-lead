@@ -10,9 +10,20 @@ import { ExtractedLead } from '../entities/Lead';
  *
  * Implementations must never invent unstated values; unknown fields are null.
  */
+
+/** Per-call extraction settings. */
+export interface ExtractionOptions {
+  /**
+   * Model to use for this call, overriding the configured default. Must be one
+   * of EXTRACTION_MODELS — callers validate before reaching here. Extractors
+   * that do not use a model ignore it.
+   */
+  modelId?: string;
+}
+
 export interface ILeadExtractor {
   /** Identifies which extractor produced a result, recorded on the lead. */
   readonly extractorName: string;
 
-  extract(title: string, text: string): Promise<ExtractedLead>;
+  extract(title: string, text: string, options?: ExtractionOptions): Promise<ExtractedLead>;
 }

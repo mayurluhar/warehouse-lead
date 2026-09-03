@@ -50,7 +50,7 @@ export const LeadTable: React.FC<LeadTableProps> = ({
           No warehouse leads in queue
         </div>
         <p style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', maxWidth: '420px' }}>
-          Trigger a "Live RSS Scan" or load "Benchmark Data" from the control hub above to start gathering qualified warehouse occupier signals.
+          Trigger a "Live RSS Scan" from the control hub above, or ingest a URL or newsletter text, to start gathering qualified warehouse occupier signals.
         </p>
       </div>
     );

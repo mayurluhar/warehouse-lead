@@ -26,7 +26,12 @@ export default $config({
       // two values ("*, *") and blocks every response.
       url: { cors: false },
       link: [evidenceBucket],
-      timeout: "60 seconds",
+      // A targeted scan fans out across ~36 Google News queries plus 12
+      // publication feeds, then runs each surviving document through Bedrock
+      // sequentially (deduplication depends on ordering). The connectors hold
+      // their own fetch budgets, but extraction dominates and 60s was no longer
+      // enough once the feed list grew.
+      timeout: "300 seconds",
       memory: "1024 MB",
       permissions: [
         {
@@ -41,8 +46,25 @@ export default $config({
         },
       ],
       environment: {
-        BEDROCK_REGION: process.env.BEDROCK_REGION || "us-east-1",
+        // No default: the region must match where model access was granted,
+        // and guessing one produces throttling that looks like a quota problem.
+        BEDROCK_REGION: process.env.BEDROCK_REGION || "ap-south-1",
+        // A bare foundation-model ID is fine: the extractor retries with the
+        // region's inference-profile ID (us./eu./apac.) when Bedrock reports
+        // that on-demand throughput is unsupported. See .env.example.
         DEFAULT_MODEL_ID: process.env.DEFAULT_MODEL_ID || "anthropic.claude-3-5-sonnet-20241022-v2:0",
+
+        // Document sources and geocoding are configuration, not code — no feed
+        // URL, place name or coordinate is held in the repository. See
+        // .env.example for the formats and a working starter feed list.
+        PUBLICATION_FEEDS: process.env.PUBLICATION_FEEDS || "",
+        ENABLE_GOOGLE_NEWS: process.env.ENABLE_GOOGLE_NEWS || "",
+        NOMINATIM_BASE_URL: process.env.NOMINATIM_BASE_URL || "https://nominatim.openstreetmap.org",
+        NOMINATIM_USER_AGENT:
+          process.env.NOMINATIM_USER_AGENT || "warehouse-lead-intelligence-poc/0.1",
+        NOMINATIM_MIN_INTERVAL_MS: process.env.NOMINATIM_MIN_INTERVAL_MS || "1100",
+        NOMINATIM_PROBE_COUNT: process.env.NOMINATIM_PROBE_COUNT || "4",
+        NOMINATIM_COUNTRY_CODE: process.env.NOMINATIM_COUNTRY_CODE || "",
       },
     });
 

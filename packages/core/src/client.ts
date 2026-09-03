@@ -13,3 +13,11 @@
 export * from './domains/lead/entities';
 export { LeadQueryService } from './domains/lead/services/LeadQueryService';
 export { PipelineStatsService } from './domains/lead/services/PipelineStatsService';
+export { GeoService } from './domains/lead/services/GeoService';
+// The model allowlist the UI renders its selector from — same list the server
+// validates against, so the two cannot drift.
+export {
+  EXTRACTION_MODELS,
+  DEFAULT_EXTRACTION_MODEL_ID,
+  findExtractionModel
+} from './domains/lead/entities/ExtractionModel';

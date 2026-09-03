@@ -1,3 +1,3 @@
-export * from './RssNewsSource';
+export * from './GoogleNewsRssSource';
+export * from './PublicationRssSource';
 export * from './UrlScraperSource';
-export * from './SampleSignalBank';

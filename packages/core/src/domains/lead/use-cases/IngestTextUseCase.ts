@@ -1,9 +1,11 @@
 import { RequestContext } from '../../../common/RequestContext';
 import { UseCase } from '../../../common/UseCase';
+import { GeoRadius } from '../entities/Geo';
 import { Lead } from '../entities/Lead';
 import { SourceDocument, SourceType, TrustTier } from '../entities/SourceDocument';
 import { IIngestionMetricsRepository } from '../ports/IIngestionMetricsRepository';
 import { LeadIngestionService } from '../services/LeadIngestionService';
+import { assertSelectableModel } from './assertSelectableModel';
 
 export interface IngestTextInput {
   text: string;
@@ -11,6 +13,10 @@ export interface IngestTextInput {
   sourceUrl?: string;
   sourceType?: SourceType;
   trustTier?: TrustTier;
+  /** Overrides the default extraction model; must be on the allowlist. */
+  modelId?: string;
+  /** The area the caller searched; scoring ranks by distance from it. */
+  near?: GeoRadius;
 }
 
 export interface IngestTextOutput {
@@ -19,6 +25,8 @@ export interface IngestTextOutput {
   lead: Lead | null;
   isNew: boolean;
   isCorroborated: boolean;
+  /** Set when a degraded fallback extractor produced this result. */
+  extractionFallbackReason?: string;
 }
 
 /**
@@ -42,6 +50,8 @@ export class IngestTextUseCase extends UseCase<IngestTextInput, IngestTextOutput
     if (!input.text?.trim()) {
       throw new Error('Validation failed: text is required');
     }
+
+    assertSelectableModel(input.modelId);
 
     const now = new Date().toISOString();
     const title = input.title || 'Direct Ingestion Signal';
@@ -68,6 +78,9 @@ export class IngestTextUseCase extends UseCase<IngestTextInput, IngestTextOutput
 
     await this.metricsRepository.incrementScanned(1, context.tenantId);
 
-    return this.ingestionService.ingestDocument(document, context.tenantId);
+    return this.ingestionService.ingestDocument(document, context.tenantId, {
+      modelId: input.modelId,
+      searchCentre: input.near
+    });
   }
 }

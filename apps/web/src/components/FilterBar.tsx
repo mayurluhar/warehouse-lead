@@ -1,13 +1,22 @@
 import React from 'react';
-import { Search, MapPin, Gauge } from 'lucide-react';
+import { Search, Gauge } from 'lucide-react';
+import { GeoRadius } from '@warehouse-lead/core/client';
+import { LocationFilter } from './LocationFilter';
 
 interface FilterBarProps {
   search: string;
   onSearchChange: (val: string) => void;
   selectedIntent: string;
   onIntentChange: (val: string) => void;
-  selectedCorridor: string;
-  onCorridorChange: (val: string) => void;
+  /** Coordinate + radius search; null means no geographic restriction. */
+  near: GeoRadius | null;
+  onNearChange: (val: GeoRadius | null) => void;
+  /** Leads without resolved coordinates, hidden while a radius is active. */
+  leadsWithoutCoordinates: number;
+  /** Leads with coordinates that fall outside the active radius. */
+  leadsOutsideRadius: number;
+  includeUnlocated: boolean;
+  onIncludeUnlocatedChange: (value: boolean) => void;
   minConfidence: number;
   onConfidenceChange: (val: number) => void;
 }
@@ -22,27 +31,18 @@ const INTENT_OPTIONS: { label: string; value: string }[] = [
   { label: 'Watch Signals', value: 'watch' },
 ];
 
-const CORRIDOR_OPTIONS = [
-  'All Corridors',
-  'Sanand',
-  'Changodar',
-  'Aslali',
-  'Chhatral / Kadi',
-  'Dahej / Bharuch',
-  'Hazira / Surat',
-  'Savli / Halol',
-  'Bhiwandi',
-  'Chakan / Talegaon',
-  'Ahmedabad'
-];
 
 export const FilterBar: React.FC<FilterBarProps> = ({
   search,
   onSearchChange,
   selectedIntent,
   onIntentChange,
-  selectedCorridor,
-  onCorridorChange,
+  near,
+  onNearChange,
+  leadsWithoutCoordinates,
+  leadsOutsideRadius,
+  includeUnlocated,
+  onIncludeUnlocatedChange,
   minConfidence,
   onConfidenceChange
 }) => {
@@ -71,7 +71,7 @@ export const FilterBar: React.FC<FilterBarProps> = ({
         <Search size={16} color="var(--text-muted)" />
         <input
           type="text"
-          placeholder="Search by company, tender ref, micro-corridor, industry..."
+          placeholder="Search by company, tender ref, corridor, industry..."
           value={search}
           onChange={(e) => onSearchChange(e.target.value)}
           style={{
@@ -112,30 +112,15 @@ export const FilterBar: React.FC<FilterBarProps> = ({
         })}
       </div>
 
-      {/* Corridor dropdown */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-        <MapPin size={15} color="var(--text-muted)" />
-        <select
-          value={selectedCorridor}
-          onChange={(e) => onCorridorChange(e.target.value === 'All Corridors' ? '' : e.target.value)}
-          style={{
-            backgroundColor: '#ffffff',
-            border: '1px solid var(--border-medium)',
-            borderRadius: '6px',
-            color: 'var(--text-primary)',
-            fontSize: '0.82rem',
-            fontWeight: 500,
-            padding: '6px 10px',
-            outline: 'none'
-          }}
-        >
-          {CORRIDOR_OPTIONS.map((c) => (
-            <option key={c} value={c} style={{ backgroundColor: '#ffffff', color: '#0f172a' }}>
-              {c}
-            </option>
-          ))}
-        </select>
-      </div>
+      {/* Coordinate + radius search */}
+      <LocationFilter
+        value={near}
+        onChange={onNearChange}
+        hiddenCount={leadsWithoutCoordinates}
+        outsideCount={leadsOutsideRadius}
+        includeUnlocated={includeUnlocated}
+        onIncludeUnlocatedChange={onIncludeUnlocatedChange}
+      />
 
       {/* Min confidence range */}
       <div style={{ display: 'flex', alignItems: 'center', gap: '8px', minWidth: '150px' }}>

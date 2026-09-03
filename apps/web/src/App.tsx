@@ -5,8 +5,11 @@ import { IngestionHub } from './components/IngestionHub';
 import { FilterBar } from './components/FilterBar';
 import { LeadTable } from './components/LeadTable';
 import { LeadDetailDrawer } from './components/LeadDetailDrawer';
+import { ExtractionAlert } from './components/ExtractionAlert';
 import { IngestionResponse } from './services/api';
 import {
+  DEFAULT_EXTRACTION_MODEL_ID,
+  GeoRadius,
   IngestionMetrics,
   Lead,
   LeadQueryService,
@@ -33,17 +36,26 @@ export const App: React.FC = () => {
   const [leads, setLeads] = useState<Lead[]>([]);
   const [metrics, setMetrics] = useState<IngestionMetrics>({ scannedTotal: 0, falsePositivesTotal: 0 });
   const [loading, setLoading] = useState(false);
+  const [modelId, setModelId] = useState<string>(DEFAULT_EXTRACTION_MODEL_ID);
   const [selectedLeadId, setSelectedLeadId] = useState<string | null>(null);
+  // Survives the ingestion hub's transient status line, because the leads it
+  // affected stay in the table long after that message is replaced.
+  const [extractionAlert, setExtractionAlert] = useState<IngestionResponse['extraction'] | null>(null);
 
   // Filters
   const [search, setSearch] = useState('');
   const [selectedIntent, setSelectedIntent] = useState('');
-  const [selectedCorridor, setSelectedCorridor] = useState('');
+  const [near, setNear] = useState<GeoRadius | null>(null);
+  // On by default: a lead the sources never located should still be reviewable.
+  // Turning it off makes the radius strict, for when only mapped leads matter.
+  const [includeUnlocated, setIncludeUnlocated] = useState(true);
   const [minConfidence, setMinConfidence] = useState(0);
 
   /** Folds an ingestion response into local state. */
   const applyIngestion = useCallback((result: IngestionResponse) => {
     setLeads(result.leads ?? []);
+    // Clear on a healthy run so a stale warning cannot outlive the problem.
+    setExtractionAlert(result.extraction?.degraded ? result.extraction : null);
     setMetrics((prev) => ({
       scannedTotal: prev.scannedTotal + (result.scannedCount ?? 0),
       falsePositivesTotal: prev.falsePositivesTotal + (result.discardedCount ?? 0)
@@ -55,10 +67,26 @@ export const App: React.FC = () => {
       queryService.apply(leads, {
         search: search || undefined,
         intent: (selectedIntent || undefined) as Lead['intent'] | undefined,
-        corridor: selectedCorridor || undefined,
-        minConfidence: minConfidence > 0 ? minConfidence : undefined
+        near: near ?? undefined,
+        includeUnlocated,
+        minConfidence: minConfidence > 0 ? minConfidence : undefined,
+        // With a centre point, nearest-first is the useful ordering.
+        sortBy: near ? 'distance' : undefined
       }),
-    [leads, search, selectedIntent, selectedCorridor, minConfidence]
+    [leads, search, selectedIntent, near, includeUnlocated, minConfidence]
+  );
+
+  // Leads the radius filter can never match, reported rather than silently lost.
+  const leadsWithoutCoordinates = useMemo(
+    () => queryService.countWithoutCoordinates(leads),
+    [leads]
+  );
+
+  // Leads that do have coordinates but fall outside the radius. Distinct from
+  // the above: this one is fixed by widening the search, not by better sources.
+  const leadsOutsideRadius = useMemo(
+    () => (near ? queryService.countOutsideRadius(leads, near) : 0),
+    [leads, near]
   );
 
   const stats = useMemo(() => statsService.calculate(leads, metrics), [leads, metrics]);
@@ -96,12 +124,25 @@ export const App: React.FC = () => {
         padding: '24px',
         flex: 1
       }}>
+        {/* Degraded-extraction warning */}
+        {extractionAlert?.degraded && (
+          <ExtractionAlert
+            reason={extractionAlert.reason ?? 'AI extraction was unavailable for this run.'}
+            fallbackCount={extractionAlert.fallbackCount}
+            processedCount={extractionAlert.processedCount}
+            onDismiss={() => setExtractionAlert(null)}
+          />
+        )}
+
         {/* Pipeline Summary Counters */}
         <StatsBar stats={stats} />
 
         {/* Ingestion Hub */}
         <IngestionHub
           knownLeads={leads}
+          scanNear={near}
+          modelId={modelId}
+          onModelChange={setModelId}
           onIngested={applyIngestion}
           onLoadingChange={setLoading}
         />
@@ -112,8 +153,12 @@ export const App: React.FC = () => {
           onSearchChange={setSearch}
           selectedIntent={selectedIntent}
           onIntentChange={setSelectedIntent}
-          selectedCorridor={selectedCorridor}
-          onCorridorChange={setSelectedCorridor}
+          near={near}
+          onNearChange={setNear}
+          leadsWithoutCoordinates={leadsWithoutCoordinates}
+          leadsOutsideRadius={leadsOutsideRadius}
+          includeUnlocated={includeUnlocated}
+          onIncludeUnlocatedChange={setIncludeUnlocated}
           minConfidence={minConfidence}
           onConfidenceChange={setMinConfidence}
         />

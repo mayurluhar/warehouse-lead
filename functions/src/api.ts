@@ -1,6 +1,6 @@
 import { APIGatewayProxyEventV2, APIGatewayProxyResultV2 } from 'aws-lambda';
-import { Lead, createRequestContext } from '@warehouse-lead/core';
-import { createRequestContainer } from './composition/Container';
+import { GeoRadius, Lead, createRequestContext } from '@warehouse-lead/core';
+import { createRequestContainer, searchPlaces } from './composition/Container';
 import { errorResponse, response } from './http/HttpResponse';
 
 /**
@@ -46,6 +46,36 @@ function parseKnownLeads(body: Record<string, unknown>): Lead[] {
   return Array.isArray(known) ? (known as Lead[]) : [];
 }
 
+/**
+ * Reads an optional search area off the request.
+ *
+ * Absent or partial coordinates mean "no geographic focus" and the scan runs
+ * nationally; malformed ones are rejected by the use case rather than silently
+ * ignored, so a typo surfaces instead of quietly changing what was searched.
+ */
+function parseNear(body: Record<string, unknown>): GeoRadius | undefined {
+  const { latitude, longitude, radiusKm } = body as {
+    latitude?: unknown; longitude?: unknown; radiusKm?: unknown;
+  };
+  if (latitude === undefined || longitude === undefined) return undefined;
+
+  return {
+    latitude: Number(latitude),
+    longitude: Number(longitude),
+    radiusKm: radiusKm === undefined ? 100 : Number(radiusKm)
+  };
+}
+
+/** Extraction health for the single-document paths (URL and pasted text). */
+function singleDocumentExtraction(reason?: string) {
+  return {
+    degraded: Boolean(reason),
+    fallbackCount: reason ? 1 : 0,
+    processedCount: 1,
+    reason
+  };
+}
+
 function singleDocumentCounts(isRelevant: boolean, isNew: boolean): IngestionCounts {
   return {
     scannedCount: 1,
@@ -71,33 +101,54 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
       const body = parseBody(event);
       const container = createRequestContainer(parseKnownLeads(body), context.tenantId);
 
+      // --- Discovery: fetch the document list only. No AI, no leads. ---
+      // The client then posts each document back to /api/ingest/document, one
+      // per request, so a scan never bundles dozens of AI calls into one call.
+
       if (path === '/api/ingest/scan') {
-        const result = await container.scanNewsSources.execute(undefined, context);
-        const { leads } = await container.listLeads.execute({}, context);
+        const result = await container.discoverLive.execute({ near: parseNear(body) }, context);
         return response(200, {
           success: true,
-          scannedCount: result.scannedCount,
-          relevantCount: result.relevantCount,
-          discardedCount: result.discardedCount,
-          newLeadsAdded: result.newLeadsAdded,
+          documents: result.documents,
+          documentCount: result.documents.length,
+          focusPlaces: result.focusPlaces,
+          sourceReports: result.sourceReports
+        });
+      }
+
+      // --- Processing: exactly one document per request. ---
+      if (path === '/api/ingest/document') {
+        const result = await container.ingestDocument.execute(
+          {
+            document: body.document as never,
+            modelId: body.modelId as string | undefined,
+            near: parseNear(body)
+          },
+          context
+        );
+        const { leads } = await container.listLeads.execute({}, context);
+        return response(200, {
+          success: result.isRelevant,
+          isRelevant: result.isRelevant,
+          reason: result.reason,
+          isNew: result.isNew,
+          isCorroborated: result.isCorroborated,
+          lead: result.lead,
+          extraction: singleDocumentExtraction(result.extractionFallbackReason),
+          ...singleDocumentCounts(result.isRelevant, result.isNew),
           leads
         });
       }
 
-      if (path === '/api/ingest/samples') {
-        const result = await container.ingestSampleSignals.execute(undefined, context);
-        return response(200, {
-          success: true,
-          scannedCount: result.scannedCount,
-          relevantCount: result.relevantCount,
-          discardedCount: result.discardedCount,
-          newLeadsAdded: result.newLeadsAdded,
-          leads: result.leads
-        });
-      }
-
       if (path === '/api/ingest/url') {
-        const result = await container.ingestUrl.execute({ url: body.url as string }, context);
+        const result = await container.ingestUrl.execute(
+          {
+            url: body.url as string,
+            modelId: body.modelId as string | undefined,
+            near: parseNear(body)
+          },
+          context
+        );
         const { leads } = await container.listLeads.execute({}, context);
         return response(200, {
           success: result.isRelevant,
@@ -107,6 +158,7 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
           isCorroborated: result.isCorroborated,
           lead: result.lead,
           document: result.document,
+          extraction: singleDocumentExtraction(result.extractionFallbackReason),
           ...singleDocumentCounts(result.isRelevant, result.isNew),
           leads
         });
@@ -119,7 +171,9 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
             title: body.title as string | undefined,
             sourceUrl: body.sourceUrl as string | undefined,
             sourceType: body.sourceType as never,
-            trustTier: body.trustTier as never
+            trustTier: body.trustTier as never,
+            modelId: body.modelId as string | undefined,
+            near: parseNear(body)
           },
           context
         );
@@ -131,10 +185,22 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
           isNew: result.isNew,
           isCorroborated: result.isCorroborated,
           lead: result.lead,
+          extraction: singleDocumentExtraction(result.extractionFallbackReason),
           ...singleDocumentCounts(result.isRelevant, result.isNew),
           leads
         });
       }
+    }
+
+    // Live place lookup for the location picker. Proxied rather than called
+    // from the browser so the geocoder's rate limit and User-Agent stay under
+    // server control, and so a different geocoder is a server-side swap.
+    if (method === 'GET' && path === '/api/geo/search') {
+      const query = event.queryStringParameters?.q?.trim() ?? '';
+      if (!query) {
+        return response(400, { error: 'Validation failed: q is required' });
+      }
+      return response(200, { success: true, places: await searchPlaces(query) });
     }
 
     if (path === '' || path === '/' || path === '/api/health') {

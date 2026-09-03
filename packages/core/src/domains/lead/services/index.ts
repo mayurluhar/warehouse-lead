@@ -4,3 +4,4 @@ export * from './DocumentNormalizer';
 export * from './PipelineStatsService';
 export * from './LeadQueryService';
 export * from './LeadIngestionService';
+export * from './GeoService';

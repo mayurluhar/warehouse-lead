@@ -1,11 +1,15 @@
 import {
   BedrockLeadExtractor,
   DocumentNormalizer,
+  GeoService,
+  DiscoverDocumentsUseCase,
+  GoogleNewsRssSource,
   HeuristicLeadExtractor,
   ILeadExtractor,
+  NominatimGazetteer,
   InMemoryIngestionMetricsRepository,
   InMemoryLeadRepository,
-  IngestSampleSignalsUseCase,
+  IngestDocumentUseCase,
   IngestTextUseCase,
   IngestUrlUseCase,
   Lead,
@@ -14,9 +18,7 @@ import {
   LeadQueryService,
   LeadScoringService,
   ListLeadsUseCase,
-  RssNewsSource,
-  SampleSignalBank,
-  ScanNewsSourcesUseCase,
+  PublicationRssSource,
   UrlScraperSource
 } from '@warehouse-lead/core';
 
@@ -41,26 +43,60 @@ import {
  */
 
 const normalizer = new DocumentNormalizer();
-const scoringService = new LeadScoringService();
 const queryService = new LeadQueryService();
+const geoService = new GeoService();
+const scoringService = new LeadScoringService({ geoService });
 const deduplicationService = new LeadDeduplicationService({ scoringService });
+
+// Live geocoding: no place names or coordinates are held in the codebase.
+// Swapping in a commercial geocoder means replacing this one line with another
+// IGazetteer implementation.
+const gazetteer = new NominatimGazetteer({ geoService });
 
 const extractor: ILeadExtractor = new BedrockLeadExtractor({
   fallback: new HeuristicLeadExtractor()
 });
 
-const rssNewsSource = new RssNewsSource({ normalizer });
-const sampleSource = new SampleSignalBank({ normalizer });
+const googleNewsSource = new GoogleNewsRssSource({ normalizer });
+const publicationSource = new PublicationRssSource({ normalizer });
 const scraper = new UrlScraperSource({ normalizer });
 
-/** The scheduled-scan source registry. Tender-portal connectors get added here. */
-const documentSources = [rssNewsSource];
+/**
+ * The scheduled-scan source registry. Tender-portal connectors (CPPP/eProcure,
+ * Gujarat state portals) get added here — the pipeline needs no other change.
+ *
+ * Publication feeds are the primary source because they carry direct publisher
+ * article URLs, which is what makes a lead's evidence openable.
+ *
+ * Google News is opt-in via ENABLE_GOOGLE_NEWS=true. It is off by default
+ * because its links are news.google.com redirects that frequently serve an
+ * anti-bot interstitial instead of the article, and because issuing search
+ * queries at scan volume gets the caller rate-limited. See GoogleNewsRssSource.
+ */
+const documentSources = [
+  publicationSource,
+  ...(process.env.ENABLE_GOOGLE_NEWS === 'true' ? [googleNewsSource] : [])
+];
+
+/**
+ * Free-text place lookup for the UI's location picker.
+ *
+ * Exported directly rather than as a use case because it neither reads nor
+ * writes lead state, so it needs none of the per-request object graph. It is
+ * proxied through the API rather than called from the browser so that the
+ * geocoder's rate limit and User-Agent stay under server control.
+ */
+export function searchPlaces(query: string, limit?: number) {
+  return gazetteer.search(query, limit);
+}
 
 export interface RequestContainer {
-  scanNewsSources: ScanNewsSourcesUseCase;
+  /** Fetches the document list from the live sources — no extraction. */
+  discoverLive: DiscoverDocumentsUseCase;
+  /** Processes exactly one already-discovered document. */
+  ingestDocument: IngestDocumentUseCase;
   ingestUrl: IngestUrlUseCase;
   ingestText: IngestTextUseCase;
-  ingestSampleSignals: IngestSampleSignalsUseCase;
   listLeads: ListLeadsUseCase;
 }
 
@@ -82,14 +118,15 @@ export function createRequestContainer(seedLeads: Lead[], tenantId: string): Req
     extractor,
     deduplicationService,
     leadRepository,
-    metricsRepository
+    metricsRepository,
+    gazetteer
   });
 
   return {
-    scanNewsSources: new ScanNewsSourcesUseCase({ documentSources, ingestionService, leadRepository }),
+    discoverLive: new DiscoverDocumentsUseCase({ documentSources, gazetteer }),
+    ingestDocument: new IngestDocumentUseCase({ ingestionService }),
     ingestUrl: new IngestUrlUseCase({ scraper, ingestionService, metricsRepository }),
     ingestText: new IngestTextUseCase({ ingestionService, metricsRepository }),
-    ingestSampleSignals: new IngestSampleSignalsUseCase({ sampleSource, ingestionService, leadRepository }),
     listLeads: new ListLeadsUseCase({ leadRepository })
   };
 }

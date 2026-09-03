@@ -1,5 +1,7 @@
+import { GeoRadius } from '../entities/Geo';
 import { ExtractedLead, ScoreBreakdown } from '../entities/Lead';
 import { SourceDocument } from '../entities/SourceDocument';
+import { GeoService } from './GeoService';
 
 /**
  * Deterministic, explainable lead confidence scoring (0-100).
@@ -11,10 +13,88 @@ import { SourceDocument } from '../entities/SourceDocument';
  * awarded what it did.
  */
 export class LeadScoringService {
+  private readonly geoService: GeoService;
+
+  constructor(deps: { geoService: GeoService }) {
+    this.geoService = deps.geoService;
+  }
+
+  /**
+   * Location relevance (0-15), measured against the area the analyst actually
+   * searched.
+   *
+   * This component used to award its top marks to a hardcoded list of Gujarat
+   * corridors, which meant a search centred on Chennai still ranked Gujarat
+   * leads highest — the scoring carried a geography preference that had nothing
+   * to do with the query. Distance from the search centre replaces it: a lead
+   * near the point you asked about scores high wherever on earth that point is.
+   *
+   * Without a search centre there is no distance to measure, so the component
+   * falls back to how *specifically* the location was named. That is a genuine
+   * quality signal — a named corridor is more actionable than a bare state —
+   * and it favours no particular part of the map.
+   */
+  private scoreLocation(
+    extracted: ExtractedLead,
+    explanations: string[],
+    searchCentre?: GeoRadius
+  ): number {
+    const point = this.geoService.toPoint(extracted.location);
+
+    if (searchCentre && point) {
+      const distanceKm = this.geoService.distanceKm(searchCentre, point);
+      const proximity = distanceKm / Math.max(searchCentre.radiusKm, 1);
+      const place = extracted.location.corridor || extracted.location.city || 'location';
+      const rounded = distanceKm < 10 ? distanceKm.toFixed(1) : Math.round(distanceKm).toString();
+
+      if (proximity <= 0.25) {
+        explanations.push(`${place} is ${rounded} km from the search centre — inner quarter of the radius (+15)`);
+        return 15;
+      }
+      if (proximity <= 0.5) {
+        explanations.push(`${place} is ${rounded} km from the search centre — inner half of the radius (+12)`);
+        return 12;
+      }
+      if (proximity <= 1) {
+        explanations.push(`${place} is ${rounded} km from the search centre — inside the radius (+9)`);
+        return 9;
+      }
+
+      explanations.push(`${place} is ${rounded} km away — outside the ${searchCentre.radiusKm} km search radius (+3)`);
+      return 3;
+    }
+
+    if (searchCentre && !point) {
+      explanations.push('No coordinates could be resolved, so distance from the search centre is unknown (+2)');
+      return 2;
+    }
+
+    if (extracted.location.corridor) {
+      explanations.push(`Specific micro-corridor named: ${extracted.location.corridor} (+12)`);
+      return 12;
+    }
+    if (extracted.location.city) {
+      explanations.push(`City named: ${extracted.location.city} (+9)`);
+      return 9;
+    }
+    if (extracted.location.state) {
+      explanations.push(`Only a state named: ${extracted.location.state} (+6)`);
+      return 6;
+    }
+
+    explanations.push('No location named in the source (+2)');
+    return 2;
+  }
+
+  /**
+   * @param searchCentre The area the caller searched, when there was one.
+   *                     Location relevance is measured against it.
+   */
   public calculateScore(
     extracted: ExtractedLead,
     primarySource: SourceDocument,
-    corroboratingSources: SourceDocument[] = []
+    corroboratingSources: SourceDocument[] = [],
+    searchCentre?: GeoRadius
   ): ScoreBreakdown {
     const explanations: string[] = [];
 
@@ -94,21 +174,7 @@ export class LeadScoringService {
     }
 
     // 4. Location Relevance (0 - 15)
-    let locationRelevance = 0;
-    const gujaratCorridors = ['Sanand', 'Changodar', 'Aslali', 'Chhatral / Kadi', 'Dahej / Bharuch', 'Hazira / Surat', 'Savli / Halol'];
-    if (extracted.location.corridor && gujaratCorridors.includes(extracted.location.corridor)) {
-      locationRelevance = 15;
-      explanations.push(`Prime Gujarat logistics corridor: ${extracted.location.corridor} (+15)`);
-    } else if (extracted.location.state === 'Gujarat') {
-      locationRelevance = 12;
-      explanations.push('Core client target state: Gujarat (+12)');
-    } else if (extracted.location.city) {
-      locationRelevance = 9;
-      explanations.push(`Major Indian warehousing hub: ${extracted.location.city} (+9)`);
-    } else {
-      locationRelevance = 2;
-      explanations.push('General or unmapped territory (+2)');
-    }
+    const locationRelevance = this.scoreLocation(extracted, explanations, searchCentre);
 
     // 5. Recency (0 - 10)
     let recency = 10;

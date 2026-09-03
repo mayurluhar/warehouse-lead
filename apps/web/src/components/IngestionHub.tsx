@@ -1,41 +1,53 @@
-import React, { useState } from 'react';
+import React, { useRef, useState } from 'react';
 import {
-  triggerMultiSourceScan,
+  discoverLiveDocuments,
+  ingestOneDocument,
   ingestUrl,
   ingestRawText,
-  loadBenchmarkSamples,
+  DiscoveryResponse,
   IngestionResponse
 } from '../services/api';
-import { Lead } from '@warehouse-lead/core/client';
+import { GeoRadius, Lead, SourceDocument } from '@warehouse-lead/core/client';
+import { ModelSelector } from './ModelSelector';
 import {
   Radio,
   Globe,
   FileText,
-  Database,
   ArrowRight,
   Loader2,
   CheckCircle2,
   AlertCircle,
-  Sparkles
+  Sparkles,
+  StopCircle
 } from 'lucide-react';
 
 interface IngestionHubProps {
   /** Leads this browser holds; sent so the server can deduplicate against them. */
   knownLeads: Lead[];
+  /** Area the live scan should target; null searches nationally. */
+  scanNear: GeoRadius | null;
+  /** Extraction model for the next run. */
+  modelId: string;
+  onModelChange: (modelId: string) => void;
   onIngested: (result: IngestionResponse) => void;
   onLoadingChange: (loading: boolean) => void;
 }
 
-type TabType = 'scan' | 'url' | 'text' | 'benchmark';
+type TabType = 'scan' | 'url' | 'text';
 
 export const IngestionHub: React.FC<IngestionHubProps> = ({
   knownLeads,
+  scanNear,
+  modelId,
+  onModelChange,
   onIngested,
   onLoadingChange
 }) => {
   const [activeTab, setActiveTab] = useState<TabType>('scan');
   const [loading, setLoadingState] = useState(false);
   const [statusMessage, setStatusMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+  const [progress, setProgress] = useState<{ done: number; total: number; leads: number } | null>(null);
+  const abortRef = useRef<AbortController | null>(null);
 
   const setLoading = (value: boolean) => {
     setLoadingState(value);
@@ -47,16 +59,111 @@ export const IngestionHub: React.FC<IngestionHubProps> = ({
   const [textTitle, setTextTitle] = useState('');
   const [textBody, setTextBody] = useState('');
 
+  /**
+   * Runs a discovered queue one document per request.
+   *
+   * Sequential by necessity, not caution: deduplication compares each document
+   * against the leads accumulated so far, so a parallel loop would race and
+   * create duplicate cards for the same requirement. One document per request
+   * also keeps every call well inside the Lambda timeout and confines an AI
+   * throttle to a single document rather than failing the whole scan.
+   */
+  const runQueue = async (
+    discovery: DiscoveryResponse,
+    label: string,
+    scopeNote: string
+  ) => {
+    const documents = discovery.documents ?? [];
+    const degraded = (discovery.sourceReports ?? []).filter((r) => r.status !== 'ok');
+    const blocked = degraded.filter((r) => r.status === 'blocked');
+    const sourceNote =
+      (blocked.length ? ` ${blocked.map((b) => b.source).join(', ')} is rate-limiting and was skipped.` : '') +
+      (degraded.length && !blocked.length ? ` ${degraded.map((d) => d.source).join(', ')} could not be reached.` : '');
+
+    if (documents.length === 0) {
+      setStatusMessage({
+        type: degraded.length ? 'error' : 'success',
+        text: `${label}: no documents found.${scopeNote}${sourceNote}`
+      });
+      return;
+    }
+
+    const controller = new AbortController();
+    abortRef.current = controller;
+
+    // The running lead set is tracked locally: React state updates are async,
+    // and each request must carry the leads produced by the previous one or
+    // deduplication has nothing to compare against.
+    let workingLeads = knownLeads;
+    let relevant = 0;
+    let discarded = 0;
+    let added = 0;
+    let failures = 0;
+    let processed = 0;
+
+    setProgress({ done: 0, total: documents.length, leads: 0 });
+
+    for (const document of documents) {
+      if (controller.signal.aborted) break;
+
+      try {
+        const res = await ingestOneDocument(
+          document as SourceDocument,
+          workingLeads,
+          modelId,
+          scanNear,
+          controller.signal
+        );
+        workingLeads = res.leads ?? workingLeads;
+        onIngested(res);
+
+        if (res.isRelevant) {
+          relevant++;
+          if (res.isNew) added++;
+        } else {
+          discarded++;
+        }
+        failures = 0;
+      } catch (err) {
+        if (controller.signal.aborted) break;
+        failures++;
+        // Three consecutive failures means the backend is unwell; pressing on
+        // through the remaining documents would just repeat the same error.
+        if (failures >= 3) {
+          setStatusMessage({
+            type: 'error',
+            text: `${label} stopped after ${processed} of ${documents.length} documents: ${(err as Error).message}`
+          });
+          break;
+        }
+      }
+
+      processed++;
+      setProgress({ done: processed, total: documents.length, leads: workingLeads.length });
+    }
+
+    abortRef.current = null;
+    setProgress(null);
+
+    const stopped = controller.signal.aborted;
+    setStatusMessage({
+      type: failures >= 3 && processed === 0 ? 'error' : 'success',
+      text:
+        `${label} ${stopped ? 'stopped' : 'finished'}: processed ${processed} of ${documents.length} documents. ` +
+        `Extracted ${relevant} warehouse signals (${added} new). Discarded ${discarded} non-demand items.` +
+        scopeNote + sourceNote
+    });
+  };
+
   const handleScan = async () => {
     setLoading(true);
     setStatusMessage(null);
     try {
-      const res = await triggerMultiSourceScan(knownLeads);
-      onIngested(res);
-      setStatusMessage({
-        type: 'success',
-        text: `Live scan finished! Scanned ${res.scannedCount} items. Extracted ${res.relevantCount} warehouse signals (${res.newLeadsAdded} new). Discarded ${res.discardedCount} non-demand items.`
-      });
+      const discovery = await discoverLiveDocuments(scanNear);
+      const scope = discovery.focusPlaces?.length
+        ? ` Targeted: ${discovery.focusPlaces.join(', ')}.`
+        : ' Searched nationally — set a latitude and longitude to target an area.';
+      await runQueue(discovery, 'Live scan', scope);
     } catch (err) {
       setStatusMessage({ type: 'error', text: `Scan failed: ${(err as Error).message}` });
     } finally {
@@ -64,13 +171,14 @@ export const IngestionHub: React.FC<IngestionHubProps> = ({
     }
   };
 
+
   const handleUrlIngest = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!urlInput) return;
     setLoading(true);
     setStatusMessage(null);
     try {
-      const res = await ingestUrl(urlInput, knownLeads);
+      const res = await ingestUrl(urlInput, knownLeads, modelId, scanNear);
       onIngested(res);
       if (res.success) {
         setStatusMessage({
@@ -97,7 +205,7 @@ export const IngestionHub: React.FC<IngestionHubProps> = ({
     setLoading(true);
     setStatusMessage(null);
     try {
-      const res = await ingestRawText(textBody, textTitle || 'Direct Ingestion', knownLeads);
+      const res = await ingestRawText(textBody, textTitle || 'Direct Ingestion', knownLeads, modelId, scanNear);
       onIngested(res);
       if (res.success) {
         setStatusMessage({
@@ -119,23 +227,6 @@ export const IngestionHub: React.FC<IngestionHubProps> = ({
     }
   };
 
-  const handleBenchmark = async () => {
-    setLoading(true);
-    setStatusMessage(null);
-    try {
-      const res = await loadBenchmarkSamples(knownLeads);
-      onIngested(res);
-      setStatusMessage({
-        type: 'success',
-        text: `Loaded ${res.relevantCount} verified benchmark signals (FCI Aslali Tender, Blinkit Sanand Hub, Sun Pharma Changodar Cold Storage, GIDC Dahej BTS, etc.)`
-      });
-    } catch (err) {
-      setStatusMessage({ type: 'error', text: `Benchmark loading failed: ${(err as Error).message}` });
-    } finally {
-      setLoading(false);
-    }
-  };
-
   return (
     <div className="glass-panel" style={{ padding: '20px 24px', marginBottom: '24px', backgroundColor: '#ffffff' }}>
       <div style={{
@@ -150,9 +241,11 @@ export const IngestionHub: React.FC<IngestionHubProps> = ({
           <h2 style={{ fontSize: '1.05rem', fontWeight: 800, color: 'var(--text-primary)' }}>
             Lead Ingestion Control Hub
           </h2>
-          <p style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
+          <p style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', marginBottom: '10px' }}>
             Discover and extract structured warehouse leads across live feeds, direct URLs, trade newsletters, and public tenders.
           </p>
+          {/* Locked mid-run so every document in one queue uses one model. */}
+          <ModelSelector value={modelId} onChange={onModelChange} disabled={loading} />
         </div>
 
         {/* Tab Switcher */}
@@ -227,26 +320,6 @@ export const IngestionHub: React.FC<IngestionHubProps> = ({
             <span>Newsletter / Text</span>
           </button>
 
-          <button
-            onClick={() => { setActiveTab('benchmark'); setStatusMessage(null); }}
-            style={{
-              display: 'flex',
-              alignItems: 'center',
-              gap: '6px',
-              padding: '6px 12px',
-              borderRadius: '6px',
-              fontSize: '0.8rem',
-              fontWeight: 600,
-              color: activeTab === 'benchmark' ? '#059669' : 'var(--text-secondary)',
-              background: activeTab === 'benchmark' ? '#ffffff' : 'transparent',
-              boxShadow: activeTab === 'benchmark' ? '0 1px 3px rgba(0, 0, 0, 0.08)' : 'none',
-              border: activeTab === 'benchmark' ? '1px solid #e2e8f0' : '1px solid transparent',
-              transition: 'all 0.15s ease'
-            }}
-          >
-            <Database size={14} />
-            <span>Benchmark Data</span>
-          </button>
         </div>
       </div>
 
@@ -391,37 +464,62 @@ export const IngestionHub: React.FC<IngestionHubProps> = ({
         </form>
       )}
 
-      {/* Tab 4: Benchmark Dataset */}
-      {activeTab === 'benchmark' && (
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '20px' }}>
-          <div>
-            <div style={{ fontSize: '0.9rem', color: 'var(--text-primary)', fontWeight: 700, marginBottom: '4px' }}>
-              Load Real-World Benchmark Test Bank
-            </div>
-            <p style={{ fontSize: '0.82rem', color: 'var(--text-secondary)' }}>
-              Populates high-confidence government tenders (FCI Godown Hiring Aslali, GIDC Dahej BTS), quick-commerce expansions (Blinkit Sanand), pharma cold storage RFPs (Sun Pharma Changodar), and negative stock-market test signals.
-            </p>
+
+      {/* Live per-document progress */}
+      {progress && (
+        <div style={{
+          marginTop: '16px',
+          padding: '12px 14px',
+          borderRadius: '8px',
+          backgroundColor: '#eff6ff',
+          border: '1px solid #bfdbfe'
+        }}>
+          <div style={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            gap: '12px',
+            marginBottom: '8px'
+          }}>
+            <span style={{ fontSize: '0.84rem', fontWeight: 700, color: '#1e40af' }}>
+              Extracting document {progress.done} of {progress.total}
+              <span style={{ fontWeight: 500, color: '#3b82f6', marginLeft: '8px' }}>
+                {progress.leads} lead{progress.leads === 1 ? '' : 's'} so far
+              </span>
+            </span>
+
+            <button
+              onClick={() => abortRef.current?.abort()}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: '5px',
+                padding: '5px 11px',
+                borderRadius: '6px',
+                backgroundColor: '#fff1f2',
+                border: '1px solid #fecdd3',
+                color: '#be123c',
+                fontSize: '0.78rem',
+                fontWeight: 700,
+                whiteSpace: 'nowrap'
+              }}
+            >
+              <StopCircle size={13} />
+              <span>Stop</span>
+            </button>
           </div>
-          <button
-            onClick={handleBenchmark}
-            disabled={loading}
-            style={{
-              display: 'flex',
-              alignItems: 'center',
-              gap: '8px',
-              padding: '9px 18px',
-              borderRadius: '8px',
-              backgroundColor: '#059669',
-              color: '#fff',
-              fontWeight: 600,
-              fontSize: '0.88rem',
-              boxShadow: '0 2px 6px rgba(5, 150, 105, 0.25)',
-              whiteSpace: 'nowrap'
-            }}
-          >
-            {loading ? <Loader2 size={16} style={{ animation: 'spin 1s linear infinite' }} /> : <Database size={16} />}
-            <span>{loading ? 'Loading...' : 'Load Benchmark Signals'}</span>
-          </button>
+
+          {/* Leads appear in the table as each document completes, so the bar
+              reflects work already banked rather than work merely started. */}
+          <div style={{ height: '6px', borderRadius: '999px', backgroundColor: '#dbeafe', overflow: 'hidden' }}>
+            <div style={{
+              height: '100%',
+              borderRadius: '999px',
+              backgroundColor: '#3b82f6',
+              width: `${Math.round((progress.done / Math.max(1, progress.total)) * 100)}%`,
+              transition: 'width 0.2s ease'
+            }} />
+          </div>
         </div>
       )}
 

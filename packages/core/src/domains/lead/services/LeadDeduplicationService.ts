@@ -1,3 +1,4 @@
+import { GeoRadius } from '../entities/Geo';
 import { ExtractedLead, Lead } from '../entities/Lead';
 import { SourceDocument } from '../entities/SourceDocument';
 import { LeadScoringService } from './LeadScoringService';
@@ -30,10 +31,17 @@ export class LeadDeduplicationService {
     this.scoringService = deps.scoringService;
   }
 
+  /**
+   * @param searchCentre Passed straight through to scoring, so a rescored
+   *                     corroboration is ranked against the same area as the
+   *                     original — otherwise a lead's score would jump purely
+   *                     because the second sighting arrived without context.
+   */
   public reconcile(
     extracted: ExtractedLead,
     doc: SourceDocument,
-    existingLeads: Lead[]
+    existingLeads: Lead[],
+    searchCentre?: GeoRadius
   ): ReconciliationResult {
     // 1. Exact document duplication — nothing to merge, nothing to rescore.
     for (const lead of existingLeads) {
@@ -82,7 +90,8 @@ export class LeadDeduplicationService {
       const newScore = this.scoringService.calculateScore(
         { ...matchingLead, isRelevant: true },
         matchingLead.primarySource,
-        matchingLead.corroboratingSources
+        matchingLead.corroboratingSources,
+        searchCentre
       );
 
       matchingLead.scoreBreakdown = newScore;
@@ -93,7 +102,7 @@ export class LeadDeduplicationService {
     }
 
     // 3. A requirement not seen before.
-    const initialScore = this.scoringService.calculateScore(extracted, doc, []);
+    const initialScore = this.scoringService.calculateScore(extracted, doc, [], searchCentre);
     const now = new Date().toISOString();
 
     const newLead: Lead = {

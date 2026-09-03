@@ -1,3 +1,4 @@
+import { GeoRadius } from './Geo';
 import { SourceDocument } from './SourceDocument';
 
 /**
@@ -34,6 +35,14 @@ export interface LocationInfo {
   corridor: string | null;
   /** The original location phrase, kept alongside the normalized geography. */
   rawText: string | null;
+  /**
+   * Coordinates resolved from the named place during ingestion, so leads can be
+   * searched by distance from an arbitrary point rather than only by exact
+   * corridor name. Null when the source named no place the gazetteer knows —
+   * such leads are excluded from radius searches rather than guessed at.
+   */
+  latitude: number | null;
+  longitude: number | null;
 }
 
 export interface ContactInfo {
@@ -87,6 +96,12 @@ export interface ExtractedLead {
   evidence: EvidenceQuote[];
   reasoningSummary: string;
   modelUsed?: string;
+  /**
+   * Present when the primary extractor failed and a fallback produced this
+   * result. Carries a user-facing reason so the desk can report reduced
+   * accuracy instead of silently presenting degraded output as normal.
+   */
+  extractionFallback?: { reason: string };
 }
 
 /**
@@ -129,9 +144,24 @@ export interface LeadFilterOptions {
   intent?: Intent;
   city?: string;
   corridor?: string;
+  /**
+   * Restrict to leads whose resolved coordinates fall within a radius of a
+   * point. Leads without coordinates are governed by `includeUnlocated`.
+   */
+  near?: GeoRadius;
+  /**
+   * Whether leads with no resolved coordinates survive a `near` filter.
+   *
+   * A radius can only prove a lead is *outside* it. A lead whose source never
+   * named a place is not outside the circle — its position is unknown — so
+   * dropping it states something the data does not support, and hides real
+   * leads with no trace in the UI. Off by default to keep a geographic query
+   * strictly geographic; the desk turns it on so nothing disappears silently.
+   */
+  includeUnlocated?: boolean;
   minConfidence?: number;
   minSqft?: number;
   status?: LeadStatus;
-  sortBy?: 'confidence' | 'date' | 'size';
+  sortBy?: 'confidence' | 'date' | 'size' | 'distance';
   sortOrder?: 'asc' | 'desc';
 }

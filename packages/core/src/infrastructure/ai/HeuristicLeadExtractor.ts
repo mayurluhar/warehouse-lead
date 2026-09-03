@@ -22,6 +22,7 @@ import { ILeadExtractor } from "../../domains/lead/ports/ILeadExtractor";
 export class HeuristicLeadExtractor implements ILeadExtractor {
   public readonly extractorName = "nlp-heuristic-fallback";
 
+  /** Model-independent, so any modelId option is ignored. */
   public async extract(title: string, text: string): Promise<ExtractedLead> {
     return {
       ...extractWithHeuristics(title, text),
@@ -44,7 +45,7 @@ export function extractWithHeuristics(title: string, text: string): ExtractedLea
       intent: 'watch',
       requirementType: 'unknown',
       size: { value: null, unit: null, normalizedSqft: null },
-      location: { state: null, city: null, corridor: null, rawText: null },
+      location: { state: null, city: null, corridor: null, rawText: null, latitude: null, longitude: null },
       specialRequirements: [],
       deadline: null,
       leaseTermMonths: null,
@@ -220,66 +221,131 @@ function extractSize(text: string, evidence: EvidenceQuote[]): SizeInfo {
   return { value: null, unit: null, normalizedSqft: null };
 }
 
+/**
+ * Names a location by reading the text, not by matching a built-in place list.
+ *
+ * The earlier version compared against a hardcoded table of corridors and
+ * cities, which meant it could only ever recognise places somebody had already
+ * typed into the repository — a document about a town nobody listed produced no
+ * location at all. This version pulls candidate place phrases out of the prose
+ * and leaves verification to the gazetteer, which geocodes them live. A phrase
+ * that is not a real place simply fails to geocode and the lead ends up with no
+ * coordinates, exactly as an unrecognised name did before.
+ *
+ * Two cues are read, most specific first:
+ *   - An industrial-estate phrase ("Sanand GIDC", "Oragadam Industrial Area"),
+ *     which names a warehousing cluster and is the best possible search term.
+ *   - A locative preposition ("in Bhiwandi", "near Chakan"), which usually
+ *     names the town.
+ *
+ * Coordinates are attached later by the ingestion pipeline via IGazetteer;
+ * this function only names the place.
+ */
+
+/**
+ * Words that begin a capitalised phrase without naming a place. Without this,
+ * "expansion in September" and "space in Grade A facilities" both read as
+ * towns. Kept deliberately short: the geocoder is the real filter, and a
+ * false candidate costs one failed lookup, not a wrong answer.
+ */
+const NON_PLACE_WORDS = new Set([
+  'january', 'february', 'march', 'april', 'may', 'june', 'july', 'august',
+  'september', 'october', 'november', 'december',
+  'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday',
+  'grade', 'phase', 'the', 'this', 'that', 'these', 'those', 'a', 'an',
+  'india', 'indian', 'north', 'south', 'east', 'west', 'central',
+  'q1', 'q2', 'q3', 'q4', 'fy', 'rs', 'inr', 'usd', 'crore', 'lakh',
+  'company', 'firm', 'group', 'limited', 'ltd', 'pvt', 'private', 'corporation',
+  'warehouse', 'warehousing', 'godown', 'logistics', 'storage', 'facility',
+  'lease', 'tender', 'rfp', 'eoi', 'bid', 'space', 'sq', 'sqft', 'acres',
+  'new', 'mega', 'large', 'modern', 'first', 'second', 'third', 'its', 'their'
+]);
+
+/** A capitalised word run: "Sanand", "Navi Mumbai", "Sriperumbudur Oragadam". */
+const PROPER_NOUN = '([A-Z][a-zA-Z]+(?:[ -][A-Z][a-zA-Z]+){0,2})';
+
+/**
+ * Industrial-cluster naming, which pins a lead far better than a town does.
+ *
+ * Captures exactly one word before the keyword, not a multi-word run. The
+ * keyword list has to be case-insensitive ("Industrial Estate" and "industrial
+ * estate" both occur), and that same insensitivity makes a greedy capture
+ * swallow ordinary prose: "a plant at Chakan MIDC" yielded "plant at Chakan".
+ * An estate is named by the word immediately in front of it, so taking only
+ * that word removes the ambiguity instead of trying to filter it afterwards.
+ */
+const CLUSTER_PATTERN = new RegExp(
+  `([A-Z][a-zA-Z]+)\\s+(?:GIDC|MIDC|SEZ|PCPIR|Industrial\\s+(?:Estate|Area|Park|Corridor|Cluster)|Logistics\\s+(?:Park|Hub)|Industrial\\s+Belt)`,
+  'i'
+);
+
+/** "in Bhiwandi", "near Chakan", "located at Dahej". */
+const LOCATIVE_PATTERN = new RegExp(
+  `\\b(?:in|at|near|around|across|located\\s+(?:in|at)|based\\s+(?:in|at)|outskirts\\s+of)\\s+${PROPER_NOUN}`,
+  'g'
+);
+
+/**
+ * Filler that can precede a place name inside a captured phrase.
+ *
+ * The capture is greedy by necessity — "Navi Mumbai" and "Sriperumbudur
+ * Oragadam" are both real, so the pattern must allow several words — and that
+ * greed also swallows whatever came before. "a facility at Sanand GIDC"
+ * captures "facility at Sanand", which is not a place but *contains* one.
+ */
+const LEADING_FILLER = new Set([
+  'at', 'in', 'near', 'on', 'of', 'for', 'to', 'from', 'with', 'by', 'and', 'or'
+]);
+
+/**
+ * Strips leading filler off a captured phrase and returns the place inside it,
+ * or null when nothing plausible survives.
+ *
+ * Trimming rather than rejecting matters: rejecting the whole match threw away
+ * a correct place name because of the word in front of it, which sent "Sanand
+ * GIDC" — an industrial estate, the single most useful kind of match — down to
+ * the weaker locative branch and out as a city.
+ */
+function trimToPlace(candidate: string): string | null {
+  const tokens = candidate.split(/[\s-]+/).filter(Boolean);
+
+  while (tokens.length > 0) {
+    const first = tokens[0].toLowerCase();
+    if (!LEADING_FILLER.has(first) && !NON_PLACE_WORDS.has(first)) break;
+    tokens.shift();
+  }
+
+  const place = tokens.join(' ');
+  return place.length >= 3 ? place : null;
+}
+
 function extractLocation(text: string, evidence: EvidenceQuote[]): LocationInfo {
-  const corridorPatterns = [
-    { corridor: 'Sanand', city: 'Ahmedabad', state: 'Gujarat', regex: /\b(sanand|sanand industrial estate|bol gidc)\b/i },
-    { corridor: 'Changodar', city: 'Ahmedabad', state: 'Gujarat', regex: /\b(changodar|moraiya|matoda|sarkhej[- ]bavla)\b/i },
-    { corridor: 'Aslali', city: 'Ahmedabad', state: 'Gujarat', regex: /\b(aslali|bareja|kheda|dholka|barejadi|pirana)\b/i },
-    { corridor: 'Chhatral / Kadi', city: 'Gandhinagar', state: 'Gujarat', regex: /\b(chhatral|kadi|kalol|mehsana highway)\b/i },
-    { corridor: 'Dahej / Bharuch', city: 'Bharuch', state: 'Gujarat', regex: /\b(dahej|bharuch|ankleshwar|vilayat)\b/i },
-    { corridor: 'Hazira / Surat', city: 'Surat', state: 'Gujarat', regex: /\b(hazira|surat|sachin|kadodara|palsana)\b/i },
-    { corridor: 'Savli / Halol', city: 'Vadodara', state: 'Gujarat', regex: /\b(savli|halol|manjusar|waghodia|vadodara)\b/i },
-    { corridor: 'Bhiwandi', city: 'Mumbai MMR', state: 'Maharashtra', regex: /\b(bhiwandi|thane|mankoli|padgha)\b/i },
-    { corridor: 'Chakan / Talegaon', city: 'Pune', state: 'Maharashtra', regex: /\b(chakan|talegaon|shikrapur|ranjangaon)\b/i },
-    { corridor: 'Taloja / Panvel', city: 'Navi Mumbai', state: 'Maharashtra', regex: /\b(taloja|panvel|jnpt|uran)\b/i }
-  ];
+  const empty: LocationInfo = {
+    state: null, city: null, corridor: null, rawText: null, latitude: null, longitude: null
+  };
 
-  for (const item of corridorPatterns) {
-    const match = text.match(item.regex);
-    if (match) {
-      evidence.push({ field: 'location', quote: match[0] });
-      return {
-        state: item.state,
-        city: item.city,
-        corridor: item.corridor,
-        rawText: match[0]
-      };
-    }
+  const cluster = text.match(CLUSTER_PATTERN);
+  const clusterPlace = cluster ? trimToPlace(cluster[1]) : null;
+  if (cluster && clusterPlace) {
+    evidence.push({ field: 'location', quote: cluster[0] });
+    // Keep the estate suffix on the corridor name: "Sanand GIDC" geocodes to
+    // the industrial estate, whereas "Sanand" lands on the town centre.
+    const suffix = cluster[0].slice(cluster[0].indexOf(cluster[1]) + cluster[1].length).trim();
+    return { ...empty, corridor: `${clusterPlace} ${suffix}`.trim(), rawText: cluster[0] };
   }
 
-  const cityList = [
-    { city: 'Ahmedabad', state: 'Gujarat' },
-    { city: 'Surat', state: 'Gujarat' },
-    { city: 'Vadodara', state: 'Gujarat' },
-    { city: 'Rajkot', state: 'Gujarat' },
-    { city: 'Gandhinagar', state: 'Gujarat' },
-    { city: 'Mumbai', state: 'Maharashtra' },
-    { city: 'Pune', state: 'Maharashtra' },
-    { city: 'Delhi', state: 'Delhi NCR' },
-    { city: 'Bengaluru', state: 'Karnataka' },
-    { city: 'Hyderabad', state: 'Telangana' }
-  ];
+  // Locatives are scanned in order and the first plausible one wins; an
+  // article's opening sentence names where the action is far more reliably
+  // than a passing mention further down.
+  for (const match of text.matchAll(LOCATIVE_PATTERN)) {
+    const candidate = trimToPlace(match[1]);
+    if (!candidate) continue;
 
-  for (const c of cityList) {
-    const regex = new RegExp(`\\b${c.city}\\b`, 'i');
-    const match = text.match(regex);
-    if (match) {
-      evidence.push({ field: 'location', quote: match[0] });
-      return {
-        state: c.state,
-        city: c.city,
-        corridor: c.city,
-        rawText: match[0]
-      };
-    }
+    evidence.push({ field: 'location', quote: match[0] });
+    return { ...empty, city: candidate, rawText: candidate };
   }
 
-  if (/\bGujarat\b/i.test(text)) {
-    evidence.push({ field: 'location', quote: 'Gujarat' });
-    return { state: 'Gujarat', city: null, corridor: null, rawText: 'Gujarat' };
-  }
-
-  return { state: null, city: null, corridor: null, rawText: null };
+  return empty;
 }
 
 function extractOrganization(title: string, fullText: string, evidence: EvidenceQuote[]): string | null {
