@@ -267,7 +267,7 @@ export class BedrockLeadExtractor implements ILeadExtractor {
 
   /**
    * Resolution and circuit state are tracked per model, because quotas are
-   * per model: a throttled Sonnet must not disable an untouched Haiku, which
+   * per model: a throttled model must not disable an untouched one, which
    * is the entire point of letting the user switch between them.
    */
   private readonly states = new Map<string, ModelState>();
@@ -279,7 +279,7 @@ export class BedrockLeadExtractor implements ILeadExtractor {
     this.fallback = deps.fallback;
     this.region = deps.region || process.env.BEDROCK_REGION || process.env.AWS_REGION || 'us-east-1';
     this.configuredModelId =
-      deps.modelId || process.env.DEFAULT_MODEL_ID || 'anthropic.claude-3-5-sonnet-20241022-v2:0';
+      deps.modelId || process.env.DEFAULT_MODEL_ID || 'anthropic.claude-3-haiku-20240307-v1:0';
     this.maxAttempts = deps.maxAttempts ?? Number(process.env.BEDROCK_MAX_ATTEMPTS ?? 3);
     this.minIntervalMs = deps.minIntervalMs ?? Number(process.env.BEDROCK_MIN_INTERVAL_MS ?? 250);
     this.circuitBreakerThreshold = deps.circuitBreakerThreshold ?? 3;

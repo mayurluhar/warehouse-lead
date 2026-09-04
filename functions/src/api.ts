@@ -1,6 +1,6 @@
 import { APIGatewayProxyEventV2, APIGatewayProxyResultV2 } from 'aws-lambda';
 import { GeoRadius, Lead, createRequestContext } from '@warehouse-lead/core';
-import { createRequestContainer, searchPlaces } from './composition/Container';
+import { createRequestContainer, isLinkedInConfigured, searchPlaces } from './composition/Container';
 import { errorResponse, response } from './http/HttpResponse';
 
 /**
@@ -116,6 +116,17 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
         });
       }
 
+      if (path === '/api/ingest/linkedin') {
+        const result = await container.discoverLinkedIn.execute({ near: parseNear(body) }, context);
+        return response(200, {
+          success: true,
+          documents: result.documents,
+          documentCount: result.documents.length,
+          focusPlaces: result.focusPlaces,
+          sourceReports: result.sourceReports
+        });
+      }
+
       // --- Processing: exactly one document per request. ---
       if (path === '/api/ingest/document') {
         const result = await container.ingestDocument.execute(
@@ -206,6 +217,9 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
     if (path === '' || path === '/' || path === '/api/health') {
       return response(200, {
         status: 'healthy',
+        // Lets the desk disable the LinkedIn tab rather than offering a scan
+        // that can only fail.
+        linkedInEnabled: isLinkedInConfigured(),
         service: 'Warehouse Lead Intelligence Platform - Ingestion API',
         stateful: false,
         timestamp: new Date().toISOString()

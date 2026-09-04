@@ -13,7 +13,8 @@ export type SourceType =
   | 'tender_portal'
   | 'manual_url'
   | 'manual_text'
-  | 'trade_newsletter';
+  | 'trade_newsletter'
+  | 'linkedin';
 
 /** How much the scoring engine is willing to believe a source. */
 export type TrustTier = 'official' | 'reputable_media' | 'aggregator' | 'unverified';

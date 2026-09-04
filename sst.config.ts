@@ -52,7 +52,7 @@ export default $config({
         // A bare foundation-model ID is fine: the extractor retries with the
         // region's inference-profile ID (us./eu./apac.) when Bedrock reports
         // that on-demand throughput is unsupported. See .env.example.
-        DEFAULT_MODEL_ID: process.env.DEFAULT_MODEL_ID || "anthropic.claude-3-5-sonnet-20241022-v2:0",
+        DEFAULT_MODEL_ID: process.env.DEFAULT_MODEL_ID || "anthropic.claude-3-haiku-20240307-v1:0",
 
         // Document sources and geocoding are configuration, not code — no feed
         // URL, place name or coordinate is held in the repository. See
@@ -65,6 +65,13 @@ export default $config({
         NOMINATIM_MIN_INTERVAL_MS: process.env.NOMINATIM_MIN_INTERVAL_MS || "1100",
         NOMINATIM_PROBE_COUNT: process.env.NOMINATIM_PROBE_COUNT || "4",
         NOMINATIM_COUNTRY_CODE: process.env.NOMINATIM_COUNTRY_CODE || "",
+
+        // LinkedIn discovery reaches only publicly indexed pages, through a
+        // search provider. Unset leaves the tab disabled rather than broken.
+        SEARCH_PROVIDER: process.env.SEARCH_PROVIDER || "",
+        SEARCH_API_KEY: process.env.SEARCH_API_KEY || "",
+        LINKEDIN_MAX_QUERIES: process.env.LINKEDIN_MAX_QUERIES || "8",
+        LINKEDIN_RESULTS_PER_QUERY: process.env.LINKEDIN_RESULTS_PER_QUERY || "10",
       },
     });
 

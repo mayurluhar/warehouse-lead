@@ -1,6 +1,8 @@
-import React, { useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   discoverLiveDocuments,
+  discoverLinkedInDocuments,
+  fetchCapabilities,
   ingestOneDocument,
   ingestUrl,
   ingestRawText,
@@ -10,6 +12,7 @@ import {
 import { GeoRadius, Lead, SourceDocument } from '@warehouse-lead/core/client';
 import { ModelSelector } from './ModelSelector';
 import {
+  Linkedin,
   Radio,
   Globe,
   FileText,
@@ -33,7 +36,7 @@ interface IngestionHubProps {
   onLoadingChange: (loading: boolean) => void;
 }
 
-type TabType = 'scan' | 'url' | 'text';
+type TabType = 'scan' | 'linkedin' | 'url' | 'text';
 
 export const IngestionHub: React.FC<IngestionHubProps> = ({
   knownLeads,
@@ -44,6 +47,9 @@ export const IngestionHub: React.FC<IngestionHubProps> = ({
   onLoadingChange
 }) => {
   const [activeTab, setActiveTab] = useState<TabType>('scan');
+  // Asked once at mount: the tab is shown either way, but a deployment with no
+  // search provider says so up front instead of offering a scan that must fail.
+  const [linkedInEnabled, setLinkedInEnabled] = useState(true);
   const [loading, setLoadingState] = useState(false);
   const [statusMessage, setStatusMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const [progress, setProgress] = useState<{ done: number; total: number; leads: number } | null>(null);
@@ -153,6 +159,28 @@ export const IngestionHub: React.FC<IngestionHubProps> = ({
         `Extracted ${relevant} warehouse signals (${added} new). Discarded ${discarded} non-demand items.` +
         scopeNote + sourceNote
     });
+  };
+
+  useEffect(() => {
+    fetchCapabilities()
+      .then((c) => setLinkedInEnabled(c.linkedInEnabled))
+      .catch(() => setLinkedInEnabled(false));
+  }, []);
+
+  const handleLinkedInScan = async () => {
+    setLoading(true);
+    setStatusMessage(null);
+    try {
+      const discovery = await discoverLinkedInDocuments(scanNear);
+      const scope = discovery.focusPlaces?.length
+        ? ` Searched around: ${discovery.focusPlaces.join(', ')}.`
+        : ' No area set — searched without a location filter. Set a point and radius to target a city.';
+      await runQueue(discovery, 'LinkedIn scan', scope);
+    } catch (err) {
+      setStatusMessage({ type: 'error', text: `LinkedIn scan failed: ${(err as Error).message}` });
+    } finally {
+      setLoading(false);
+    }
   };
 
   const handleScan = async () => {
@@ -279,6 +307,27 @@ export const IngestionHub: React.FC<IngestionHubProps> = ({
           </button>
 
           <button
+            onClick={() => { setActiveTab('linkedin'); setStatusMessage(null); }}
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: '6px',
+              padding: '6px 12px',
+              borderRadius: '6px',
+              fontSize: '0.8rem',
+              fontWeight: 600,
+              color: activeTab === 'linkedin' ? '#0a66c2' : 'var(--text-secondary)',
+              background: activeTab === 'linkedin' ? '#ffffff' : 'transparent',
+              boxShadow: activeTab === 'linkedin' ? '0 1px 3px rgba(0, 0, 0, 0.08)' : 'none',
+              border: activeTab === 'linkedin' ? '1px solid #e2e8f0' : '1px solid transparent',
+              transition: 'all 0.15s ease'
+            }}
+          >
+            <Linkedin size={14} />
+            <span>LinkedIn</span>
+          </button>
+
+          <button
             onClick={() => { setActiveTab('url'); setStatusMessage(null); }}
             style={{
               display: 'flex',
@@ -356,6 +405,57 @@ export const IngestionHub: React.FC<IngestionHubProps> = ({
           >
             {loading ? <Loader2 size={16} style={{ animation: 'spin 1s linear infinite' }} /> : <Radio size={16} />}
             <span>{loading ? 'Scanning & Extracting...' : 'Trigger Live Scan'}</span>
+          </button>
+        </div>
+      )}
+
+      {/* Tab 2: LinkedIn public posts */}
+      {activeTab === 'linkedin' && (
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '20px' }}>
+          <div>
+            <div style={{ fontSize: '0.9rem', color: 'var(--text-primary)', fontWeight: 700, marginBottom: '4px' }}>
+              Public LinkedIn Requirement Posts
+            </div>
+            <p style={{ fontSize: '0.82rem', color: 'var(--text-secondary)', maxWidth: '750px' }}>
+              Searches publicly indexed LinkedIn posts for occupier phrasing such as
+              <code style={{ color: '#0a66c2', marginLeft: '6px', background: '#f1f5f9', padding: '3px 8px', borderRadius: '6px', border: '1px solid #e2e8f0', fontSize: '0.78rem' }}>
+                "warehouse requirement", "godown required", "warehouse on lease"
+              </code>
+              , narrowed to the places around your latitude, longitude and radius.
+            </p>
+            <p style={{ fontSize: '0.76rem', color: 'var(--text-muted)', marginTop: '6px', maxWidth: '750px' }}>
+              {scanNear
+                ? `Targeting the area within ${scanNear.radiusKm} km of ${scanNear.latitude.toFixed(3)}, ${scanNear.longitude.toFixed(3)}.`
+                : 'No area set. Pick a city in the location filter below to target this search.'}
+              {' '}Results are public posts only, scored as unverified — LinkedIn publishes no post API,
+              so this cannot see private or unindexed posts.
+            </p>
+            {!linkedInEnabled && (
+              <p style={{ fontSize: '0.76rem', color: '#b45309', marginTop: '6px', fontWeight: 600 }}>
+                No search provider configured — set SEARCH_PROVIDER and SEARCH_API_KEY to enable this tab.
+              </p>
+            )}
+          </div>
+          <button
+            onClick={handleLinkedInScan}
+            disabled={loading || !linkedInEnabled}
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: '8px',
+              padding: '9px 18px',
+              borderRadius: '8px',
+              backgroundColor: linkedInEnabled ? '#0a66c2' : '#94a3b8',
+              color: '#fff',
+              fontWeight: 600,
+              fontSize: '0.88rem',
+              boxShadow: linkedInEnabled ? '0 2px 6px rgba(10, 102, 194, 0.25)' : 'none',
+              whiteSpace: 'nowrap',
+              cursor: linkedInEnabled && !loading ? 'pointer' : 'not-allowed'
+            }}
+          >
+            {loading ? <Loader2 size={16} style={{ animation: 'spin 1s linear infinite' }} /> : <Linkedin size={16} />}
+            <span>{loading ? 'Searching...' : 'Search LinkedIn'}</span>
           </button>
         </div>
       )}

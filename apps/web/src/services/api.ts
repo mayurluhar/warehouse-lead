@@ -194,6 +194,24 @@ export function ingestRawText(
   });
 }
 
+/**
+ * Step 1, restricted to publicly indexed LinkedIn posts.
+ *
+ * Separate from the RSS scan because it spends metered search-provider credits,
+ * so it runs only when the user asks for it.
+ */
+export function discoverLinkedInDocuments(near?: GeoRadius | null): Promise<DiscoveryResponse> {
+  return post('/api/ingest/linkedin', nearPayload(near));
+}
+
+/** Whether the deployment has a search provider behind the LinkedIn tab. */
+export async function fetchCapabilities(): Promise<{ linkedInEnabled: boolean }> {
+  const res = await fetch(`${API_BASE}/api/health`);
+  if (!res.ok) return { linkedInEnabled: false };
+  const body = (await res.json()) as { linkedInEnabled?: boolean };
+  return { linkedInEnabled: Boolean(body.linkedInEnabled) };
+}
+
 /** A place returned by the live geocoder, for the location picker. */
 export interface PlaceResult {
   name: string;

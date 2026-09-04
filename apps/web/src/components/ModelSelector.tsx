@@ -13,8 +13,8 @@ interface ModelSelectorProps {
  * Picks the extraction model for the next run.
  *
  * A development affordance: Bedrock's on-demand quota is per model, so when
- * Sonnet throttles mid-session, switching to Haiku keeps work moving instead of
- * waiting out the cooldown. Options come from the shared allowlist in core —
+ * the default model throttles mid-session, switching to the other one keeps work
+ * moving instead of waiting out the cooldown. Options come from the shared allowlist in core —
  * the same list the server validates against.
  */
 export const ModelSelector: React.FC<ModelSelectorProps> = ({ value, onChange, disabled }) => {

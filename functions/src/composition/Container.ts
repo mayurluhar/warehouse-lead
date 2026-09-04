@@ -17,9 +17,11 @@ import {
   LeadIngestionService,
   LeadQueryService,
   LeadScoringService,
+  LinkedInSignalSource,
   ListLeadsUseCase,
   PublicationRssSource,
-  UrlScraperSource
+  UrlScraperSource,
+  WebSearchClient
 } from '@warehouse-lead/core';
 
 /**
@@ -61,6 +63,13 @@ const googleNewsSource = new GoogleNewsRssSource({ normalizer });
 const publicationSource = new PublicationRssSource({ normalizer });
 const scraper = new UrlScraperSource({ normalizer });
 
+// LinkedIn reaches only publicly indexed pages, via a search provider — it
+// never fetches linkedin.com directly. Inert until SEARCH_PROVIDER and
+// SEARCH_API_KEY are set, at which point it reports its own misconfiguration
+// rather than silently returning nothing.
+const webSearch = new WebSearchClient();
+const linkedInSource = new LinkedInSignalSource({ normalizer, search: webSearch });
+
 /**
  * The scheduled-scan source registry. Tender-portal connectors (CPPP/eProcure,
  * Gujarat state portals) get added here — the pipeline needs no other change.
@@ -86,6 +95,11 @@ const documentSources = [
  * proxied through the API rather than called from the browser so that the
  * geocoder's rate limit and User-Agent stay under server control.
  */
+/** True when the LinkedIn tab has a usable search provider behind it. */
+export function isLinkedInConfigured(): boolean {
+  return webSearch.isConfigured;
+}
+
 export function searchPlaces(query: string, limit?: number) {
   return gazetteer.search(query, limit);
 }
@@ -93,6 +107,8 @@ export function searchPlaces(query: string, limit?: number) {
 export interface RequestContainer {
   /** Fetches the document list from the live sources — no extraction. */
   discoverLive: DiscoverDocumentsUseCase;
+  /** Same, restricted to publicly indexed LinkedIn posts. */
+  discoverLinkedIn: DiscoverDocumentsUseCase;
   /** Processes exactly one already-discovered document. */
   ingestDocument: IngestDocumentUseCase;
   ingestUrl: IngestUrlUseCase;
@@ -124,6 +140,13 @@ export function createRequestContainer(seedLeads: Lead[], tenantId: string): Req
 
   return {
     discoverLive: new DiscoverDocumentsUseCase({ documentSources, gazetteer }),
+    // Its own registration rather than a member of documentSources: LinkedIn is
+    // a separate, metered surface the user opts into per scan, and folding it
+    // into the RSS scan would spend search credits on every run.
+    discoverLinkedIn: new DiscoverDocumentsUseCase({
+      documentSources: [linkedInSource],
+      gazetteer
+    }),
     ingestDocument: new IngestDocumentUseCase({ ingestionService }),
     ingestUrl: new IngestUrlUseCase({ scraper, ingestionService, metricsRepository }),
     ingestText: new IngestTextUseCase({ ingestionService, metricsRepository }),

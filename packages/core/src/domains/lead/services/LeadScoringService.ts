@@ -192,7 +192,13 @@ export class LeadScoringService {
         explanations.push('Older signal published > 30 days ago (+4)');
       }
     } else {
-      explanations.push('Recent timestamp (+10)');
+      // An undated source is not a fresh one. This branch used to award the
+      // full 10 points and label them "Recent timestamp", which meant any
+      // source that could not supply a date — LinkedIn results, in particular,
+      // since search providers rarely date them — outscored a genuinely fresh
+      // article on recency. Unknown is scored as unknown.
+      recency = 4;
+      explanations.push('Publication date unknown, so freshness cannot be credited (+4)');
     }
 
     // 6. Corroboration (0 - 10)
