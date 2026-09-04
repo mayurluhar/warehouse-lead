@@ -6,14 +6,18 @@ import { FilterBar } from './components/FilterBar';
 import { LeadTable } from './components/LeadTable';
 import { LeadDetailDrawer } from './components/LeadDetailDrawer';
 import { ExtractionAlert } from './components/ExtractionAlert';
-import { IngestionResponse } from './services/api';
+import { DocumentTable } from './components/DocumentTable';
+import { ReviewTab, ReviewTabs } from './components/ReviewTabs';
+import { IngestionResponse, promoteDocument } from './services/api';
+import { ScanRecord, unqualifiedRecords, upsertRecord } from './scanRecords';
 import {
   DEFAULT_EXTRACTION_MODEL_ID,
   GeoRadius,
   IngestionMetrics,
   Lead,
   LeadQueryService,
-  PipelineStatsService
+  PipelineStatsService,
+  SourceDocument
 } from '@warehouse-lead/core/client';
 
 /**
@@ -34,6 +38,12 @@ const statsService = new PipelineStatsService();
 
 export const App: React.FC = () => {
   const [leads, setLeads] = useState<Lead[]>([]);
+  // Every document this session has processed, kept so the classifier's
+  // rejections can be reviewed rather than silently discarded.
+  const [records, setRecords] = useState<ScanRecord[]>([]);
+  const [reviewTab, setReviewTab] = useState<ReviewTab>('qualified');
+  const [promotingHash, setPromotingHash] = useState<string | null>(null);
+  const [promoteError, setPromoteError] = useState<string | null>(null);
   const [metrics, setMetrics] = useState<IngestionMetrics>({ scannedTotal: 0, falsePositivesTotal: 0 });
   const [loading, setLoading] = useState(false);
   const [modelId, setModelId] = useState<string>(DEFAULT_EXTRACTION_MODEL_ID);
@@ -62,6 +72,62 @@ export const App: React.FC = () => {
     }));
   }, []);
 
+  /** Records one processed document, whichever way the classifier ruled. */
+  const handleDocumentProcessed = useCallback(
+    (document: SourceDocument, result: IngestionResponse) => {
+      setRecords((prev) =>
+        upsertRecord(prev, {
+          document,
+          verdict: result.isRelevant ? 'qualified' : 'unqualified',
+          reason: result.reason ?? '',
+          leadId: result.lead?.id ?? null,
+          promoted: false,
+          processedAt: new Date().toISOString()
+        })
+      );
+    },
+    []
+  );
+
+  /**
+   * Re-ingests a rejected document with the relevance verdict overridden.
+   *
+   * Runs the real pipeline rather than fabricating a lead client-side: the
+   * promoted item still needs extraction, geocoding, deduplication and scoring,
+   * and a hand-built stub would carry a fake score into the same table as
+   * genuinely scored leads.
+   */
+  const handlePromote = useCallback(
+    async (record: ScanRecord) => {
+      setPromotingHash(record.document.contentHash);
+      setPromoteError(null);
+      try {
+        const res = await promoteDocument(record.document, leads, modelId, near);
+        setLeads(res.leads ?? []);
+        setRecords((prev) =>
+          upsertRecord(prev, {
+            ...record,
+            verdict: 'qualified',
+            leadId: res.lead?.id ?? null,
+            promoted: true,
+            reason: res.lead
+              ? `Approved by you. ${res.reason ?? ''}`.trim()
+              : record.reason,
+            processedAt: new Date().toISOString()
+          })
+        );
+        // Land the reviewer where the lead now is, so an approval visibly
+        // produces something rather than just removing a row.
+        if (res.lead) setReviewTab('qualified');
+      } catch (err) {
+        setPromoteError(`Could not approve "${record.document.title}": ${(err as Error).message}`);
+      } finally {
+        setPromotingHash(null);
+      }
+    },
+    [leads, modelId, near]
+  );
+
   const visibleLeads = useMemo(
     () =>
       queryService.apply(leads, {
@@ -89,6 +155,16 @@ export const App: React.FC = () => {
     [leads, near]
   );
 
+  const rejected = useMemo(() => unqualifiedRecords(records), [records]);
+
+  // Newest first, matching the rejected list, so the two tabs read consistently.
+  const allRecords = useMemo(
+    () => [...records].sort((a, b) => b.processedAt.localeCompare(a.processedAt)),
+    [records]
+  );
+
+  const hiddenByFilters = Math.max(0, leads.length - visibleLeads.length);
+
   const stats = useMemo(() => statsService.calculate(leads, metrics), [leads, metrics]);
 
   // Derived rather than stored, so the drawer always shows the current lead
@@ -108,8 +184,10 @@ export const App: React.FC = () => {
   const handleClearAll = () => {
     if (confirm('Are you sure you want to reset all leads and pipeline stats?')) {
       setLeads([]);
+      setRecords([]);
       setMetrics({ scannedTotal: 0, falsePositivesTotal: 0 });
       setSelectedLeadId(null);
+      setPromoteError(null);
     }
   };
 
@@ -144,6 +222,7 @@ export const App: React.FC = () => {
           modelId={modelId}
           onModelChange={setModelId}
           onIngested={applyIngestion}
+          onDocumentProcessed={handleDocumentProcessed}
           onLoadingChange={setLoading}
         />
 
@@ -163,19 +242,68 @@ export const App: React.FC = () => {
           onConfidenceChange={setMinConfidence}
         />
 
-        {/* Lead Table / Inbox */}
-        <div style={{ marginBottom: '12px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <div style={{ fontSize: '0.88rem', fontWeight: 600, color: 'var(--text-secondary)' }}>
-            Showing <span style={{ color: 'var(--text-primary)', fontWeight: 800 }}>{visibleLeads.length}</span> qualified warehouse requirement leads
-          </div>
-        </div>
-
-        <LeadTable
-          leads={visibleLeads}
-          onSelectLead={(lead) => setSelectedLeadId(lead.id)}
-          onUpdateStatus={(id, status, e) => handleUpdateStatus(id, status, e)}
-          selectedLeadId={selectedLeadId}
+        {/* Three review lists: everything scanned, what qualified, what did not */}
+        <ReviewTabs
+          active={reviewTab}
+          onChange={setReviewTab}
+          allCount={records.length}
+          qualifiedCount={leads.length}
+          unqualifiedCount={rejected.length}
         />
+
+        {promoteError && (
+          <div
+            className="glass-panel"
+            style={{ padding: '12px 16px', marginBottom: '12px', color: '#b91c1c', fontSize: '0.86rem' }}
+          >
+            {promoteError}
+          </div>
+        )}
+
+        {reviewTab === 'qualified' && (
+          <>
+            <div style={{ marginBottom: '12px', fontSize: '0.88rem', fontWeight: 600, color: 'var(--text-secondary)' }}>
+              Showing{' '}
+              <span style={{ color: 'var(--text-primary)', fontWeight: 800 }}>{visibleLeads.length}</span>{' '}
+              of {leads.length} qualified warehouse requirement lead{leads.length === 1 ? '' : 's'}
+              {hiddenByFilters > 0 && (
+                // The single most confusing state in the app: leads exist but the
+                // table looks empty. Naming the cause beats leaving the user to
+                // conclude nothing was found.
+                <span style={{ color: '#b45309', fontWeight: 700 }}>
+                  {' '}— {hiddenByFilters} hidden by the filters above
+                  {leadsOutsideRadius > 0 && near
+                    ? ` (${leadsOutsideRadius} outside the ${near.radiusKm} km radius)`
+                    : ''}
+                </span>
+              )}
+            </div>
+
+            <LeadTable
+              leads={visibleLeads}
+              onSelectLead={(lead) => setSelectedLeadId(lead.id)}
+              onUpdateStatus={(id, status, e) => handleUpdateStatus(id, status, e)}
+              selectedLeadId={selectedLeadId}
+            />
+          </>
+        )}
+
+        {reviewTab === 'unqualified' && (
+          <DocumentTable
+            records={rejected}
+            onPromote={handlePromote}
+            promotingHash={promotingHash}
+            emptyMessage="Nothing rejected yet. Articles the classifier rules out will appear here for review."
+          />
+        )}
+
+        {reviewTab === 'all' && (
+          <DocumentTable
+            records={allRecords}
+            promotingHash={promotingHash}
+            emptyMessage="No articles scanned yet. Run a live scan to populate this list."
+          />
+        )}
       </main>
 
       {/* Deep Inspection Drawer */}

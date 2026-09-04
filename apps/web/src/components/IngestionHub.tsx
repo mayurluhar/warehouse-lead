@@ -33,6 +33,14 @@ interface IngestionHubProps {
   modelId: string;
   onModelChange: (modelId: string) => void;
   onIngested: (result: IngestionResponse) => void;
+  /**
+   * Reports what happened to one document, qualified or not.
+   *
+   * Separate from onIngested because that call carries the *lead* set, which
+   * says nothing about the articles that produced no lead — and those are
+   * exactly what the unqualified list is built from.
+   */
+  onDocumentProcessed: (document: SourceDocument, result: IngestionResponse) => void;
   onLoadingChange: (loading: boolean) => void;
 }
 
@@ -44,6 +52,7 @@ export const IngestionHub: React.FC<IngestionHubProps> = ({
   modelId,
   onModelChange,
   onIngested,
+  onDocumentProcessed,
   onLoadingChange
 }) => {
   const [activeTab, setActiveTab] = useState<TabType>('scan');
@@ -122,6 +131,7 @@ export const IngestionHub: React.FC<IngestionHubProps> = ({
         );
         workingLeads = res.leads ?? workingLeads;
         onIngested(res);
+        onDocumentProcessed(document as SourceDocument, res);
 
         if (res.isRelevant) {
           relevant++;
@@ -208,6 +218,9 @@ export const IngestionHub: React.FC<IngestionHubProps> = ({
     try {
       const res = await ingestUrl(urlInput, knownLeads, modelId, scanNear);
       onIngested(res);
+      // The URL path is the one place the server builds the document for us, so
+      // it comes back on the response and can be recorded like a scanned one.
+      if (res.document) onDocumentProcessed(res.document, res);
       if (res.success) {
         setStatusMessage({
           type: 'success',

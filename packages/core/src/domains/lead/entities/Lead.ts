@@ -129,6 +129,16 @@ export interface Lead {
   confidence: number;
   scoreBreakdown: ScoreBreakdown;
   status: LeadStatus;
+  /**
+   * How this lead entered the qualified set.
+   *
+   * 'manual' means a reviewer promoted a document the classifier had rejected.
+   * Recorded because such a lead's score was computed over text the model judged
+   * irrelevant, so its fields are likelier to be sparse or wrong — a reviewer
+   * comparing two leads deserves to know one of them overrode the classifier.
+   * Absent is equivalent to 'auto' for leads created before this existed.
+   */
+  qualification?: 'auto' | 'manual';
   /** The document the lead was first built from. */
   primarySource: SourceDocument;
   /** Independent sources describing the same underlying requirement. */

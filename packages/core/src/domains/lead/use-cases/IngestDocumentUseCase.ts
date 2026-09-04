@@ -12,6 +12,11 @@ export interface IngestDocumentInput {
   modelId?: string;
   /** The area the caller searched; scoring ranks by distance from it. */
   near?: GeoRadius;
+  /**
+   * Reviewer override: qualify this document even if the classifier rejects it.
+   * Set only by the "approve" action on the unqualified list.
+   */
+  forceRelevant?: boolean;
 }
 
 export interface IngestDocumentOutput {
@@ -51,7 +56,8 @@ export class IngestDocumentUseCase extends UseCase<IngestDocumentInput, IngestDo
 
     return this.ingestionService.ingestDocument(document, context.tenantId, {
       modelId: input.modelId,
-      searchCentre: input.near
+      searchCentre: input.near,
+      forceRelevant: input.forceRelevant === true
     });
   }
 }

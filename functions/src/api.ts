@@ -133,7 +133,10 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
           {
             document: body.document as never,
             modelId: body.modelId as string | undefined,
-            near: parseNear(body)
+            near: parseNear(body),
+            // Strict true only: any other value is a normal classified ingest,
+            // so a stray string cannot silently qualify every document.
+            forceRelevant: body.forceRelevant === true
           },
           context
         );

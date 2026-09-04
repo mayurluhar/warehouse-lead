@@ -54,10 +54,14 @@ export default $config({
         // that on-demand throughput is unsupported. See .env.example.
         DEFAULT_MODEL_ID: process.env.DEFAULT_MODEL_ID || "anthropic.claude-3-haiku-20240307-v1:0",
 
-        // Document sources and geocoding are configuration, not code — no feed
-        // URL, place name or coordinate is held in the repository. See
-        // .env.example for the formats and a working starter feed list.
+        // Geocoding is entirely live — no place name or coordinate is held in
+        // the repository. Feed ADDRESSES ship in publicationFeeds.ts so a fresh
+        // clone scans without setup; the article content is always fetched at
+        // scan time. See .env.example for the override formats.
+        // Optional override; unset means the built-in list in publicationFeeds.ts.
         PUBLICATION_FEEDS: process.env.PUBLICATION_FEEDS || "",
+        RSS_MAX_ITEMS_PER_FEED: process.env.RSS_MAX_ITEMS_PER_FEED || "0",
+        RSS_TIME_BUDGET_MS: process.env.RSS_TIME_BUDGET_MS || "120000",
         ENABLE_GOOGLE_NEWS: process.env.ENABLE_GOOGLE_NEWS || "",
         NOMINATIM_BASE_URL: process.env.NOMINATIM_BASE_URL || "https://nominatim.openstreetmap.org",
         NOMINATIM_USER_AGENT:

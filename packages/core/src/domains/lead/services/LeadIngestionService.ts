@@ -22,6 +22,16 @@ export interface IngestionOptions extends ExtractionOptions {
    * rather than to a geography baked into the code.
    */
   searchCentre?: GeoRadius;
+  /**
+   * Ingests the document even when the classifier rejects it.
+   *
+   * Set only by an explicit reviewer action — promoting something from the
+   * unqualified list. The document is still extracted normally, so the fields
+   * and evidence are whatever the model could find; only the relevance verdict
+   * is overridden, and the resulting lead is marked `qualification: 'manual'`
+   * so the override stays visible downstream.
+   */
+  forceRelevant?: boolean;
 }
 
 export interface DocumentIngestionOutcome {
@@ -92,7 +102,7 @@ export class LeadIngestionService {
     const extracted = await this.extractor.extract(doc.title, doc.cleanText, options);
     const extractionFallbackReason = extracted.extractionFallback?.reason;
 
-    if (!extracted.isRelevant) {
+    if (!extracted.isRelevant && !options?.forceRelevant) {
       await this.metricsRepository.incrementFalsePositives(1, tenantId);
       logger.debug('Document rejected as not a warehouse requirement', {
         tenantId,
@@ -125,6 +135,12 @@ export class LeadIngestionService {
       existingLeads,
       options?.searchCentre
     );
+
+    // A reviewer override is recorded on the lead itself, not just in the
+    // response, so it survives into the desk's state and the detail drawer.
+    if (options?.forceRelevant && !extracted.isRelevant) {
+      lead.qualification = 'manual';
+    }
 
     await this.leadRepository.save(lead, tenantId);
 

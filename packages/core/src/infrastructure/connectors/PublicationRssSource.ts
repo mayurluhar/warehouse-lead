@@ -1,32 +1,24 @@
-import { mapWithConcurrency } from '../../common/concurrency';
 import { getLogger } from '../../common/Logger';
 import { SourceDocument, TrustTier } from '../../domains/lead/entities/SourceDocument';
 import { IDocumentSource } from '../../domains/lead/ports/IDocumentSource';
 import { DocumentNormalizer } from '../../domains/lead/services/DocumentNormalizer';
+import { DEFAULT_PUBLICATION_FEEDS, PublicationFeed } from './publicationFeeds';
 import { fetchFeed } from './rssFetch';
 
 const logger = getLogger('PublicationRssSource');
 
-export interface PublicationFeed {
-  name: string;
-  url: string;
-  trustTier: TrustTier;
-}
+export type { PublicationFeed } from './publicationFeeds';
 
 /**
- * Feeds are configuration, not code.
+ * Where the feed list comes from.
  *
- * The list used to be a hardcoded array here, which meant adding a publication
- * or dropping a dead feed required a code change and a redeploy. It now comes
- * from PUBLICATION_FEEDS, so the set of sources is owned by the environment —
- * see .env.example for the format and a working starter list.
+ * The list lives in code (publicationFeeds.ts) so a fresh clone scans without
+ * setup and adding a publication is a reviewable diff. PUBLICATION_FEEDS still
+ * overrides it entirely when set, which is what a deployment uses to swap
+ * sources without a build.
  *
- * Something has to name which feeds to fetch; there is no way to discover them
- * from nothing. What matters is that the name lives in configuration where an
- * operator can change it, rather than baked into a build artifact.
- *
- * Format is one feed per line (or semicolon-separated), `name | url | tier`,
- * with the trust tier optional and defaulting to reputable_media:
+ * The env format is one feed per line (or semicolon-separated), `name | url |
+ * tier`, with the trust tier optional and defaulting to reputable_media:
  *
  *   ET Industry | https://economictimes.indiatimes.com/.../13352306.cms | reputable_media
  *
@@ -56,16 +48,18 @@ export function parseFeedConfig(raw: string): PublicationFeed[] {
     });
 }
 
-function feedsFromEnvironment(): PublicationFeed[] {
+function resolveFeeds(): PublicationFeed[] {
   const raw = process.env.PUBLICATION_FEEDS?.trim();
-  if (!raw) {
-    // Deliberately not a thrown error: a misconfigured deployment should show
-    // "no feeds configured" in the source report, where an operator will see
-    // it, rather than turning every scan into a 500.
-    logger.warn('PUBLICATION_FEEDS is not set; the publication source has nothing to fetch');
-    return [];
+  if (!raw) return DEFAULT_PUBLICATION_FEEDS;
+
+  const parsed = parseFeedConfig(raw);
+  if (parsed.length === 0) {
+    // Every line was malformed. Falling back beats scanning nothing, and the
+    // warning names the real problem instead of reporting an empty news day.
+    logger.warn('PUBLICATION_FEEDS is set but no entry parsed; using the built-in feed list');
+    return DEFAULT_PUBLICATION_FEEDS;
   }
-  return parseFeedConfig(raw);
+  return parsed;
 }
 
 /**
@@ -87,8 +81,13 @@ const RELEVANCE_KEYWORDS = [
 interface PublicationRssOptions {
   normalizer: DocumentNormalizer;
   feeds?: PublicationFeed[];
+  /**
+   * Items read per feed. Unset means every item the feed publishes, which is
+   * the intended behaviour — see the note on fetchDocuments about why that is
+   * still a bounded number.
+   */
   maxItemsPerFeed?: number;
-  concurrency?: number;
+  /** Wall-clock ceiling for the whole pass, so one dead host cannot hang a scan. */
   timeBudgetMs?: number;
 }
 
@@ -98,15 +97,19 @@ export class PublicationRssSource implements IDocumentSource {
   private readonly normalizer: DocumentNormalizer;
   private readonly feeds: PublicationFeed[];
   private readonly maxItemsPerFeed: number;
-  private readonly concurrency: number;
   private readonly timeBudgetMs: number;
 
   constructor(options: PublicationRssOptions) {
     this.normalizer = options.normalizer;
-    this.feeds = options.feeds ?? feedsFromEnvironment();
-    this.maxItemsPerFeed = options.maxItemsPerFeed ?? 25;
-    this.concurrency = options.concurrency ?? 6;
-    this.timeBudgetMs = options.timeBudgetMs ?? 25000;
+    this.feeds = options.feeds ?? resolveFeeds();
+    // 0 means no cap. Anything non-numeric in the env is treated the same way,
+    // so a typo widens the scan rather than silently truncating it to zero items.
+    const configuredCap = Number(process.env.RSS_MAX_ITEMS_PER_FEED);
+    this.maxItemsPerFeed =
+      options.maxItemsPerFeed ?? (Number.isFinite(configuredCap) && configuredCap > 0 ? configuredCap : 0);
+    // Sequential fetching needs a far larger budget than the old concurrent
+    // pass: ~22 feeds at up to 8s each. Still well inside the 300s Lambda.
+    this.timeBudgetMs = options.timeBudgetMs ?? Number(process.env.RSS_TIME_BUDGET_MS ?? 120000);
   }
 
   private looksRelevant(text: string): boolean {
@@ -114,7 +117,22 @@ export class PublicationRssSource implements IDocumentSource {
     return RELEVANCE_KEYWORDS.some((keyword) => lower.includes(keyword));
   }
 
-  /** Publication feeds are national; geography is applied by the radius filter. */
+  /**
+   * Reads every configured feed, one at a time.
+   *
+   * Sequential rather than concurrent so each feed is a discrete, attributable
+   * step: the log names which publication produced what, a failure points at one
+   * host, and no publisher sees six simultaneous requests from us — which is
+   * what tends to trigger the soft blocks the fetcher already detects.
+   *
+   * Every item a feed publishes is read; there is no per-feed cap by default.
+   * That is still a bounded number, and the bound is not ours: RSS serves a
+   * rolling window of the latest items (typically 20-50), not an archive. No
+   * setting on this side reaches yesterday's articles once they roll off — that
+   * needs either repeated scans over time or a different kind of source.
+   *
+   * Geography is applied later by the radius filter; these feeds are national.
+   */
   public async fetchDocuments(): Promise<SourceDocument[]> {
     // Surfaces as a failed source report rather than an empty-but-healthy scan,
     // so a missing configuration looks like a problem instead of a quiet news day.
@@ -128,51 +146,72 @@ export class PublicationRssSource implements IDocumentSource {
     const seenHashes = new Set<string>();
     const documents: SourceDocument[] = [];
     let inspected = 0;
+    let skipped = 0;
 
-    await mapWithConcurrency(
-      this.feeds,
-      async (feed) => {
-        try {
-          const parsed = await fetchFeed(feed.url);
+    for (const [index, feed] of this.feeds.entries()) {
+      if (Date.now() > deadlineAt) {
+        skipped = this.feeds.length - index;
+        logger.warn('Publication time budget exhausted; remaining feeds skipped', {
+          completed: index,
+          skipped
+        });
+        break;
+      }
 
-          for (const item of (parsed.items || []).slice(0, this.maxItemsPerFeed)) {
-            if (!item.title || !item.link) continue;
-            inspected++;
+      try {
+        const parsed = await fetchFeed(feed.url);
+        const items = parsed.items || [];
+        const considered = this.maxItemsPerFeed > 0 ? items.slice(0, this.maxItemsPerFeed) : items;
+        let keptFromFeed = 0;
 
-            const rawSnippet = `${item.contentSnippet || ''} ${item.content || ''}`;
-            const combined = `${item.title} ${rawSnippet}`;
-            if (!this.looksRelevant(combined)) continue;
+        for (const item of considered) {
+          if (!item.title || !item.link) continue;
+          inspected++;
 
-            const cleanText = this.normalizer.cleanDocumentText(rawSnippet || item.title);
-            const contentHash = this.normalizer.computeContentHash(`${item.title}\n${cleanText}`);
-            if (seenHashes.has(contentHash)) continue;
-            seenHashes.add(contentHash);
+          const rawSnippet = `${item.contentSnippet || ''} ${item.content || ''}`;
+          const combined = `${item.title} ${rawSnippet}`;
+          if (!this.looksRelevant(combined)) continue;
 
-            documents.push({
-              id: `pub_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`,
-              sourceUrl: item.link,
-              canonicalUrl: this.normalizer.canonicalizeUrl(item.link),
-              title: item.title,
-              publishedAt: item.isoDate || item.pubDate || new Date().toISOString(),
-              rawText: rawSnippet,
-              cleanText,
-              sourceType: 'rss_feed',
-              trustTier: feed.trustTier,
-              contentHash,
-              fetchedAt: new Date().toISOString()
-            });
-          }
-        } catch (error) {
-          logger.warn('Publication feed failed', { feed: feed.name, error: (error as Error).message });
+          const cleanText = this.normalizer.cleanDocumentText(rawSnippet || item.title);
+          const contentHash = this.normalizer.computeContentHash(`${item.title}\n${cleanText}`);
+          if (seenHashes.has(contentHash)) continue;
+          seenHashes.add(contentHash);
+
+          documents.push({
+            id: `pub_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`,
+            sourceUrl: item.link,
+            canonicalUrl: this.normalizer.canonicalizeUrl(item.link),
+            title: item.title,
+            publishedAt: item.isoDate || item.pubDate || new Date().toISOString(),
+            rawText: rawSnippet,
+            cleanText,
+            sourceType: 'rss_feed',
+            trustTier: feed.trustTier,
+            contentHash,
+            fetchedAt: new Date().toISOString()
+          });
+          keptFromFeed++;
         }
-      },
-      { concurrency: this.concurrency, deadlineAt }
-    );
+
+        // Per-feed accounting is the only way to tell "this publication carries
+        // no warehousing news" from "this feed has been broken for weeks".
+        logger.info('Feed read', {
+          feed: feed.name,
+          published: items.length,
+          considered: considered.length,
+          kept: keptFromFeed
+        });
+      } catch (error) {
+        logger.warn('Publication feed failed', { feed: feed.name, error: (error as Error).message });
+      }
+    }
 
     logger.info('Publication scan complete', {
       feeds: this.feeds.length,
+      feedsSkipped: skipped,
       itemsInspected: inspected,
-      documentsKept: documents.length
+      documentsKept: documents.length,
+      itemCap: this.maxItemsPerFeed || 'none'
     });
 
     return documents;

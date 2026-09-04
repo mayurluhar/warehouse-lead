@@ -29,6 +29,8 @@ export interface IngestionResponse {
   isNew?: boolean;
   isCorroborated?: boolean;
   lead?: Lead | null;
+  /** The fetched document; returned by the URL path, which builds it server-side. */
+  document?: SourceDocument;
   /** Places a targeted scan actually searched, echoed back for the UI. */
   focusPlaces?: string[];
   /** Per-source outcome, so a rate-limited feed is visible not silent. */
@@ -138,6 +140,35 @@ export function ingestOneDocument(
   return post(
     '/api/ingest/document',
     { document, knownLeads: stripRawText(knownLeads), modelId, ...nearPayload(near) },
+    signal
+  );
+}
+
+/**
+ * Re-ingests a rejected document, overriding the relevance verdict.
+ *
+ * The reviewer has looked at the item and disagreed with the classifier, so the
+ * document goes through the identical pipeline — extraction, geocoding,
+ * deduplication, scoring — with only that one verdict forced. The resulting
+ * lead carries `qualification: 'manual'`, so the override stays visible rather
+ * than becoming indistinguishable from an automatic qualification.
+ */
+export function promoteDocument(
+  document: SourceDocument,
+  knownLeads: Lead[],
+  modelId: string,
+  near?: GeoRadius | null,
+  signal?: AbortSignal
+): Promise<IngestionResponse> {
+  return post(
+    '/api/ingest/document',
+    {
+      document,
+      knownLeads: stripRawText(knownLeads),
+      modelId,
+      forceRelevant: true,
+      ...nearPayload(near)
+    },
     signal
   );
 }
